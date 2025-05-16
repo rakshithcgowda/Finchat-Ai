@@ -1,0 +1,13 @@
+bcrypt
+python-docx
+fpdf
+google-generativeai
+PyPDF2
+streamlit
+pandas
+plotly-express
+mistralai
+requests
+pytesseract
+pdf2image
+pdfplumber
