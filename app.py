@@ -98,7 +98,7 @@ def verify_password(hashed: bytes, password: str) -> bool:
 
 # ─── Authentication UI ─────────────────────────────────────────────────────────
 def login_ui(conn):
-    """Plain‐style login UI with minimal styling and a welcome banner."""
+    """Plain‐style login UI with minimal styling, welcome banner, and open registration."""
     # ─── Sidebar Styling ───────────────────────────────────────
     st.sidebar.title("🔑 Login / Register")
     st.sidebar.markdown(
@@ -138,13 +138,7 @@ def login_ui(conn):
                 st.sidebar.error("Enter both username and password")
             else:
                 cursor = conn.cursor()
-                cursor.execute("PRAGMA table_info(users)")
-                cols = [c[1] for c in cursor.fetchall()]
-
-                cursor.execute(
-                    "SELECT password, role FROM users WHERE username = ?",
-                    (username,)
-                )
+                cursor.execute("SELECT password, role FROM users WHERE username = ?", (username,))
                 row = cursor.fetchone()
 
                 if row and bcrypt.checkpw(password.encode(), row[0]):
@@ -153,7 +147,9 @@ def login_ui(conn):
                     st.session_state.username = username
                     st.session_state.role = row[1]
                     st.session_state.location_id = location_id or None
-                    # update last_login if exists
+                    # update last_login if column exists
+                    cursor.execute("PRAGMA table_info(users)")
+                    cols = [c[1] for c in cursor.fetchall()]
                     if "last_login" in cols:
                         cursor.execute(
                             "UPDATE users SET last_login = CURRENT_TIMESTAMP WHERE username = ?",
@@ -165,48 +161,37 @@ def login_ui(conn):
                     st.sidebar.error("Invalid username or password")
                     time.sleep(1)
 
-    # ─── REGISTER TAB ─────────────────────────────────────────────
+    # ─── REGISTER TAB ────────────────────────────────────────────
     with register_tab:
-        if st.session_state.get("role") == "admin":
-            new_user = st.text_input("New Username", key="reg_username")
-            new_pass = st.text_input("New Password", type="password", key="reg_password")
-            confirm_pass = st.text_input("Confirm Password", type="password", key="reg_confirm")
-            user_role = st.selectbox("Role", ["user", "admin"], key="reg_role")
+        new_user = st.text_input("New Username", key="reg_username")
+        new_pass = st.text_input("New Password", type="password", key="reg_password")
+        confirm_pass = st.text_input("Confirm Password", type="password", key="reg_confirm")
+        # Default all new registrations to 'user'
+        user_role = "user"
 
-            if st.button("Create User", key="reg_button"):
-                if not new_user or not new_pass:
-                    st.error("Username and password are required")
-                elif new_pass != confirm_pass:
-                    st.error("Passwords do not match")
-                elif len(new_pass) < 8:
-                    st.error("Password must be at least 8 characters")
-                else:
-                    try:
-                        hashed = bcrypt.hashpw(new_pass.encode(), bcrypt.gensalt())
-                        cursor = conn.cursor()
-                        cursor.execute("PRAGMA table_info(users)")
-                        cols = [c[1] for c in cursor.fetchall()]
+        if st.button("Create User", key="reg_button"):
+            if not new_user or not new_pass:
+                st.error("Username and password are required")
+            elif new_pass != confirm_pass:
+                st.error("Passwords do not match")
+            elif len(new_pass) < 8:
+                st.error("Password must be at least 8 characters")
+            else:
+                try:
+                    hashed = bcrypt.hashpw(new_pass.encode(), bcrypt.gensalt())
+                    cursor = conn.cursor()
+                    cursor.execute(
+                        "INSERT INTO users (username, password, role) VALUES (?, ?, ?)",
+                        (new_user, hashed, user_role)
+                    )
+                    conn.commit()
+                    st.success(f"User '{new_user}' created successfully.")
+                    time.sleep(1)
+                    st.rerun()
+                except sqlite3.IntegrityError:
+                    st.error("That username already exists")
 
-                        if "location_id" in cols:
-                            cursor.execute(
-                                "INSERT INTO users (username, password, role, location_id) VALUES (?, ?, ?, NULL)",
-                                (new_user, hashed, user_role)
-                            )
-                        else:
-                            cursor.execute(
-                                "INSERT INTO users (username, password, role) VALUES (?, ?, ?)",
-                                (new_user, hashed, user_role)
-                            )
-                        conn.commit()
-                        st.success(f"User '{new_user}' created successfully.")
-                        time.sleep(1)
-                        st.rerun()
-                    except sqlite3.IntegrityError:
-                        st.error("That username already exists")
-        else:
-            st.info("Only admins can register new users.")
-
-    # ─── MAIN PANE WELCOME BANNER ────────────────────────────────
+    # ─── MAIN PANE WELCOME BANNER ───────────────────────────────
     if not st.session_state.get("logged_in"):
         st.markdown(
             """
