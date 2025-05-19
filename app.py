@@ -19,6 +19,8 @@ import requests
 import pytesseract
 from pdf2image import convert_from_bytes
 import re
+from docx import Document
+
 
 # ─── Configuration ──────────────────────────────────────────────────────────────
 GOOGLE_API_KEY = os.environ.get(
@@ -666,15 +668,6 @@ def deal_structuring_ui(conn):
 
 # -------------------------------------------------offer generator----------------------------------------------------------------------------------
 
-import streamlit as st
-import io
-import json
-import docx
-from fpdf import FPDF
-from datetime import datetime
-from PyPDF2 import PdfReader
-
-
 def build_guided_prompt(details: dict, detail_level: str) -> str:
     """
     Construct a detailed prompt from guided form data to generate a real estate purchase agreement.
@@ -794,10 +787,10 @@ def offer_generator_ui(conn):
                 c1, c2, c3 = st.columns(3)
                 with c1:
                     buyer = st.text_input("Buyer Full Name*", key="offer_buyer")
-                    buyer_rep = st.text_input("Buyer's Representative", key="offer_buyer_rep")
+                    buyer_rep = st.text_input("Buyer\'s Representative", key="offer_buyer_rep")
                 with c2:
                     seller = st.text_input("Seller Full Name*", key="offer_seller")
-                    seller_rep = st.text_input("Seller's Representative", key="offer_seller_rep")
+                    seller_rep = st.text_input("Seller\'s Representative", key="offer_seller_rep")
                 with c3:
                     address = st.text_input("Property Address*", key="offer_address")
                     county = st.text_input("County", key="offer_county")
@@ -826,21 +819,107 @@ def offer_generator_ui(conn):
                 with c2:
                     expiry = st.number_input("Offer Expiration (hours)", min_value=1, max_value=168, value=48, key="offer_expiry")
                 st.markdown('</div>', unsafe_allow_html=True)
-                if st.form_submit_button("Generate Offer Draft"):
-                    missing=[]
-                    for field,msg in {"offer_buyer":"Buyer required","offer_seller":"Seller required","offer_address":"Address required","offer_price":"Price >=1000","offer_earnest":"Earnest required","offer_closing":"Closing date required"}.items():
-                        if not st.session_state.get(field): missing.append(msg)
-                    if missing: [st.error(m) for m in missing]
+
+                submitted = st.form_submit_button("Generate Offer Draft")
+                if submitted:
+                    missing = []
+                    for field, msg in {
+                        "offer_buyer": "Buyer required",
+                        "offer_seller": "Seller required",
+                        "offer_address": "Address required",
+                        "offer_price": "Price >=1000",
+                        "offer_earnest": "Earnest required",
+                        "offer_closing": "Closing date required"
+                    }.items():
+                        if not st.session_state.get(field):
+                            missing.append(msg)
+                    if missing:
+                        for m in missing:
+                            st.error(m)
                     else:
-                        st.session_state.offer_data['details']={
-                            'parties':{'buyer':buyer,'buyer_rep':buyer_rep,'seller':seller,'seller_rep':seller_rep},
-                            'property':{'address':address,'county':county},
-                            'financial':{'price':price,'earnest':earnest,'price_fmt':f"${{price:,}}",'earnest_fmt':f"${{earnest:,}}"},
-                            'dates':{'closing':closing.strftime("%B %d, %Y"),'expiry':expiry},
-                            'terms':{'financing':financing,'contingencies':cont,'special':terms,'jurisdiction':jurisdiction}
+                        st.session_state.offer_data['details'] = {
+                            'parties': {
+                                'buyer': buyer,
+                                'buyer_rep': buyer_rep,
+                                'seller': seller,
+                                'seller_rep': seller_rep
+                            },
+                            'property': {
+                                'address': address,
+                                'county': county
+                            },
+                            'financial': {
+                                'price': price,
+                                'earnest': earnest,
+                                'price_fmt': f"${price:,}",
+                                'earnest_fmt': f"${earnest:,}"
+                            },
+                            'dates': {
+                                'closing': closing.strftime("%B %d, %Y"),
+                                'expiry': expiry
+                            },
+                            'terms': {
+                                'financing': financing,
+                                'contingencies': cont,
+                                'special': terms,
+                                'jurisdiction': jurisdiction
+                            }
                         }
-                        st.session_state.offer_stage='offer_generation'
+                        st.session_state.offer_stage = 'offer_generation'
                         st.rerun()
+
+        elif method == 'Free Text':
+            st.markdown("Enter deal details (min 50 chars):")
+            text = st.text_area("Deal Details", key="offer_free_text", height=200)
+            if st.button("Generate Offer Draft Free Text", key="btn_ft_draft"):
+                if len(text) < 50:
+                    st.error("Please add more detail.")
+                else:
+                    st.session_state.offer_data['details'] = {'free_text': text}
+                    st.session_state.offer_stage = 'offer_generation'
+                    st.rerun()
+
+        elif method == 'Upload Existing':
+            uploaded = st.file_uploader("Upload Document", type=["pdf","docx","txt"], key="offer_upload")
+            if uploaded and st.button("Analyze & Improve Upload", key="btn_upload_analyze"):
+                if uploaded.type == "application/pdf":
+                    reader = PdfReader(uploaded)
+                    doc_text = "\n".join(p.extract_text() or "" for p in reader.pages)
+                elif uploaded.type == "text/plain":
+                    doc_text = uploaded.read().decode("utf-8")
+                else:
+                    doc = Document(uploaded)
+                    doc_text = "\n".join(p.text for p in doc.paragraphs)
+                st.session_state.offer_data['details'] = {'uploaded': doc_text}
+                st.session_state.offer_stage = 'offer_generation'
+                st.rerun()
+
+        else:  # Template Library
+            st.markdown("### Template Library")
+            templates = {
+                "Residential": "templates/standard_residential.json",
+                "Commercial": "templates/commercial_lease_purchase.json",
+                "Seller Financing": "templates/seller_financing.json",
+                "1031 Exchange": "templates/1031_exchange.json"
+            }
+            choice = st.selectbox("Select Template", list(templates.keys()), key="offer_template")
+            with st.expander("Preview"):
+                try:
+                    st.json(json.load(open(templates[choice])))
+                except Exception:
+                    st.warning("Preview unavailable")
+            if st.button("Use Template", key="btn_use_template"):
+                try:
+                    data = json.load(open(templates[choice]))
+                    st.session_state.offer_data['details'] = data
+                    st.session_state.offer_stage = 'offer_generation'
+                    st.rerun()
+                except Exception:
+                    st.error("Failed to load")
+
+        if st.button("← Back", key="btn_back_to_input"):
+            st.session_state.offer_stage = 'input_method'
+            st.rerun()
 
 
     # Stage 3: Offer Generation
