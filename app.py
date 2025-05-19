@@ -18,7 +18,7 @@ import requests
 import pytesseract
 from pdf2image import convert_from_bytes
 import re
- from docx import Document
+from docx import Document
 
 
 # ─── Configuration ──────────────────────────────────────────────────────────────
