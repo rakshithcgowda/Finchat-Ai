@@ -1,13 +1,12 @@
 bcrypt
-python-docx
+docx
 fpdf
 google-generativeai
 PyPDF2
 streamlit
 pandas
-plotly-express
+plotly
 mistralai
 requests
 pytesseract
 pdf2image
-pdfplumber

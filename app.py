@@ -18,6 +18,7 @@ from mistralai import Mistral
 import requests
 import pytesseract
 from pdf2image import convert_from_bytes
+import re
 
 # ─── Configuration ──────────────────────────────────────────────────────────────
 GOOGLE_API_KEY = os.environ.get(
@@ -266,47 +267,58 @@ def chunk_text(text: str, max_chars: int = 2000) -> List[str]:
 
 # ─── OCR Extraction ─────────────────────────────────────────────────────
 def extract_pdf_text(uploaded_file, ocr_threshold=100):
-    # Read raw bytes
+    """
+    Try PyPDF2 → pdfplumber → OCR via pdf2image.
+    If Poppler is missing, we skip OCR gracefully.
+    """
+    import io
+    from PyPDF2 import PdfReader
+
     raw = uploaded_file.read()
     text = ""
-    # 1) Try PyPDF2
+
+    # 1) PyPDF2
     try:
         reader = PdfReader(io.BytesIO(raw))
         text = "\n".join(page.extract_text() or "" for page in reader.pages)
     except Exception:
         text = ""
-    # 2) If still too short, try pdfplumber
+
+    # 2) pdfplumber if still too short
     if len(text.strip()) < ocr_threshold:
         try:
+            import pdfplumber
             with pdfplumber.open(io.BytesIO(raw)) as pdf:
-                pages = []
-                for page in pdf.pages:
-                    pages.append(page.extract_text() or "")
-                alt_text = "\n".join(pages)
-                if len(alt_text.strip()) > len(text.strip()):
-                    text = alt_text
+                pages = [page.extract_text() or "" for page in pdf.pages]
+            alt = "\n".join(pages)
+            if len(alt.strip()) > len(text.strip()):
+                text = alt
         except Exception:
+            # pdfplumber failed or PDF malformed
             pass
-    # 3) If still below threshold, use OCR
+
+    # 3) OCR fallback if still below threshold and pdf2image/Poppler available
     if len(text.strip()) < ocr_threshold:
-        images = convert_from_bytes(raw)
-        ocr_text = []
-        for img in images:
-            ocr_text.append(pytesseract.image_to_string(img))
-        text = "\n".join(ocr_text)
+        try:
+            from pdf2image import convert_from_bytes
+            import pytesseract
+            images = convert_from_bytes(raw)  # may raise if poppler missing
+            ocr_pages = [pytesseract.image_to_string(img) for img in images]
+            text = "\n".join(ocr_pages)
+        except Exception:
+            # Could be Poppler missing or pytesseract error; skip OCR
+            st.warning("OCR step skipped (Poppler or Tesseract not available).")
     return text
 
-# Main UI function
 
 def lease_summarization_ui(conn):
-    """Enhanced lease summarization with multi-stage AI processing and persistent output"""
+    """Enhanced lease summarization UI with styled PDF export and Poppler-safe OCR."""
     st.header("📄 Advanced Lease Summarization")
     st.markdown("Upload lease documents (PDF/DOCX) for comprehensive AI-powered analysis.")
 
-    # Initialize persistent outputs
-    if "lease_docs" not in st.session_state:
-        st.session_state["lease_docs"] = None
-        st.session_state["lease_results"] = None
+    # Initialize session state
+    if "lease_results" not in st.session_state:
+        st.session_state["lease_results"] = []
         st.session_state["lease_comparison"] = None
 
     uploaded_files = st.file_uploader(
@@ -315,6 +327,7 @@ def lease_summarization_ui(conn):
         accept_multiple_files=True,
         key="lease_upload"
     )
+
     with st.expander("Advanced Options", expanded=False):
         col1, col2 = st.columns(2)
         with col1:
@@ -333,140 +346,196 @@ def lease_summarization_ui(conn):
         with col2:
             highlight_risks = st.checkbox("Highlight Potential Risks", value=True, key="lease_risks")
             compare_clauses = st.checkbox("Compare Similar Clauses", value=True, key="lease_compare")
+
     ai_model = st.radio("AI Model", ["Gemini", "Mistral"], horizontal=True, key="lease_model")
 
-    # Analyze button
     if st.button("Analyze Documents", key="lease_analyze"):
         if not uploaded_files:
             st.error("Please upload at least one document.")
             return
-        st.session_state["lease_docs"] = uploaded_files
+
         results = []
         for uploaded_file in uploaded_files:
             uploaded_file.seek(0)
+            # Extract text safely
             if uploaded_file.type == "application/pdf":
                 text = extract_pdf_text(uploaded_file)
             else:
-                text = ".join(p.text for p in docx.Document(uploaded_file).paragraphs)"
+                import docx
+                text = "\n".join(p.text for p in docx.Document(uploaded_file).paragraphs)
 
-            preview = text[:5000] + ("..." if len(text) > 5000 else "")
-            analysis_steps = []
-
-            steps = [
-                ("Initial Document Structure Analysis", "Identify and summarize the overall structure of the document."),
-                ("Key Clause Extraction", "Extract and categorize all major clauses and provisions."),
-                ("Obligations Mapping", "Map out all parties' obligations and responsibilities."),
-                ("Financial Terms Analysis", "Identify all payment terms, amounts, and schedules."),
-                ("Termination Conditions", "Summarize conditions for termination or renewal.")
-            ]
+            # Build AI analysis
             doc_out = {"name": uploaded_file.name, "sections": []}
+            steps = [
+                ("Document Structure", "Summarize the overall structure."),
+                ("Key Clauses", "Extract and categorize major clauses."),
+                ("Obligations", "Map parties' obligations."),
+                ("Financial Terms", "Identify payments and schedules."),
+                ("Termination", "Summarize termination/renewal conditions.")
+            ]
             for title, instr in steps:
                 if ai_model == "Gemini":
-                    prompt = (f"Document Analysis Task: {instr}"
-                        f"Legal Context: {legal_jurisdiction}"
-                        f"Analysis Level: {analysis_depth}"
-                        f"Document Excerpt:{text[:15000]}"
+                    prompt = (
+                        f"{instr}\nContext: {legal_jurisdiction}\nLevel: {analysis_depth}\n\n"
+                        f"{text[:15000]}"
                     )
                     content = call_gemini("lease_summary", prompt)
                 else:
                     msgs = [
-                        {"role": "system", "content": f"You are a legal document expert specializing in {legal_jurisdiction} law. {instr}"},
-                        {"role": "user", "content": f"Analyze this with {analysis_depth} detail:{text[:15000]}"}
+                        {"role": "system", "content": f"You are a legal expert. {instr}"},
+                        {"role": "user", "content": f"{analysis_depth} detail:\n{text[:15000]}"}
                     ]
                     content = call_mistral(msgs)
                 doc_out["sections"].append({"title": title, "content": content})
+
+            # Optional risk assessment
             if highlight_risks:
                 if ai_model == "Gemini":
-                    rp = f"Analyze risks in the document:{text[:15000]}"
-                    risk = call_gemini("lease_summary", rp)
+                    content = call_gemini("lease_summary", f"Assess risks:\n{text[:15000]}")
                 else:
                     msgs = [
-                        {"role": "system", "content": "You are a legal risk assessment specialist."},
+                        {"role": "system", "content": "You are a risk assessor."},
                         {"role": "user", "content": text[:15000]}
                     ]
-                    risk = call_mistral(msgs)
-                doc_out["sections"].append({"title": "Risk Assessment", "content": risk})
+                    content = call_mistral(msgs)
+                doc_out["sections"].append({"title": "Risk Assessment", "content": content})
+
             results.append(doc_out)
             save_interaction(conn, "lease_summary", text, str(doc_out))
+
+        # Cross‐doc comparison
         comp = None
         if compare_clauses and len(results) > 1:
-            comp_text = "".join(f"DOCUMENT: {d['name']}{d['sections'][0]['content']}" for d in results)
+            comp_text = "".join(f"{d['name']}:\n{d['sections'][0]['content']}\n\n" for d in results)
             if ai_model == "Gemini":
-                comp = call_gemini("lease_summary", f"Compare clauses:{comp_text}")
+                comp = call_gemini("lease_summary", f"Compare clauses:\n{comp_text}")
             else:
                 msgs = [
-                    {"role": "system", "content": "You are a legal comparison expert."},
+                    {"role": "system", "content": "You are a comparison expert."},
                     {"role": "user", "content": comp_text}
                 ]
                 comp = call_mistral(msgs)
             save_interaction(conn, "lease_comparison", "multiple", comp)
+
         st.session_state["lease_results"] = results
         st.session_state["lease_comparison"] = comp
 
-    # Display persistent results
+    # Display results
     if st.session_state.get("lease_results"):
         st.success("Analysis Complete!")
         for doc in st.session_state["lease_results"]:
-            with st.expander(f"Analysis: {doc['name']}"):
+            with st.expander(doc["name"]):
                 for sec in doc["sections"]:
                     st.subheader(sec["title"])
                     st.markdown(sec["content"])
         if st.session_state.get("lease_comparison"):
-            st.subheader("Cross-Document Comparison")
+            st.subheader("Comparison")
             st.markdown(st.session_state["lease_comparison"])
-        # Export UI
-        fmt = st.selectbox("Export Format", ["PDF", "Word", "JSON", "HTML"], key="lease_export_fmt")
-        name = st.text_input("Export File Name", "lease_analysis", key="lease_export_name")
+
+        # Export controls
+        fmt = st.selectbox("Export As", ["PDF", "Word", "JSON", "HTML"], key="lease_export_fmt")
+        name = st.text_input("File Name", "lease_analysis", key="lease_export_name")
         if st.button("Export Analysis", key="lease_export"):
-            data = {"documents": st.session_state["lease_results"], "comparison": st.session_state["lease_comparison"]}
+            data = {
+                "documents": st.session_state["lease_results"],
+                "comparison": st.session_state["lease_comparison"]
+            }
+
+
             if fmt == "PDF":
-                pdf = FPDF(); pdf.add_page(); pdf.set_font("Arial", size=12)
-                for d in st.session_state["lease_results"]:
-                    pdf.set_font("Arial","B",16); pdf.cell(0,10,d['name'],0,1)
-                    pdf.set_font("Arial",size=12)
-                    for sec in d['sections']:
-                        pdf.set_font("Arial","B",14); pdf.cell(0,10,sec['title'],0,1)
-                        pdf.multi_cell(0,10,sec['content']); pdf.ln(5)
-                pdf_bytes = pdf.output(dest="S").encode("latin-1")
-                st.download_button("Download PDF", pdf_bytes, f"{name}.pdf","application/pdf")
+                pdf = FPDF("P", "mm", "A4")
+                pdf.set_auto_page_break(True, 15)
+
+                primary = (46, 134, 171)
+                accent  = (241, 143,   1)
+                text_col= (18,  17,   17)
+
+                for idx, d in enumerate(st.session_state["lease_results"]):
+                    pdf.add_page()
+
+                    # Title
+                    pdf.set_text_color(*primary)
+                    pdf.set_font("Arial", "B", 20)
+                    pdf.cell(0, 10, d["name"], ln=True, align="C")
+                    y = pdf.get_y() + 2
+                    pdf.set_draw_color(*accent)
+                    pdf.set_line_width(0.5)
+                    pdf.line(15, y, 195, y)
+                    pdf.ln(5)
+
+                    # Sections
+                    for sec in d["sections"]:
+                        # Clean out any asterisks
+                        title = re.sub(r"\*", "", sec["title"])
+                        pdf.set_text_color(*primary)
+                        pdf.set_font("Arial", "B", 14)
+                        pdf.multi_cell(0, 8, title)
+                        pdf.ln(1)
+
+                        pdf.set_text_color(*text_col)
+                        pdf.set_font("Arial", "", 11)
+                        for line in sec["content"].split("\n"):
+                            # remove stray asterisks and then latin-1–safe encode
+                            clean = re.sub(r"\*", "", line)
+                            safe  = clean.encode("latin-1", "replace").decode("latin-1")
+                            pdf.multi_cell(0, 6, safe)
+                        pdf.ln(4)
+
+                    # Footer
+                    pdf.set_y(-15)
+                    pdf.set_draw_color(*primary)
+                    pdf.line(15, pdf.get_y(), 195, pdf.get_y())
+                    pdf.set_font("Arial", "I", 8)
+                    pdf.set_text_color(*text_col)
+                    pdf.cell(0, 10, f"Page {idx+1}", align="R")
+
+                pdf_bytes = pdf.output(dest="S").encode("latin-1", "replace")
+                st.download_button("Download PDF", pdf_bytes, f"{name}.pdf", "application/pdf")
+
+
             elif fmt == "Word":
+                import io, docx
                 docx_out = docx.Document()
                 for d in st.session_state["lease_results"]:
-                    docx_out.add_heading(d['name'],level=1)
-                    for sec in d['sections']:
-                        docx_out.add_heading(sec['title'],level=2)
-                        docx_out.add_paragraph(sec['content'])
-                buf = io.BytesIO(); docx_out.save(buf)
-                st.download_button("Download Word", buf.getvalue(), f"{name}.docx","application/vnd.openxmlformats-officedocument.wordprocessingml.document")
+                    docx_out.add_heading(d["name"], 1)
+                    for sec in d["sections"]:
+                        docx_out.add_heading(sec["title"], 2)
+                        docx_out.add_paragraph(sec["content"])
+                buf = io.BytesIO()
+                docx_out.save(buf)
+                st.download_button("Download Word", buf.getvalue(), f"{name}.docx",
+                                   "application/vnd.openxmlformats-officedocument.wordprocessingml.document")
+
             elif fmt == "JSON":
-                st.download_button("Download JSON", json.dumps(data,indent=2).encode(), f"{name}.json","application/json")
-            else:
+                st.download_button("Download JSON", json.dumps(data, indent=2).encode(),
+                                   f"{name}.json", "application/json")
+
+            else:  # HTML
                 html = "<html><body>"
                 for d in st.session_state["lease_results"]:
                     html += f"<h1>{d['name']}</h1>"
-                    for sec in d['sections']:
+                    for sec in d["sections"]:
                         html += f"<h2>{sec['title']}</h2><p>{sec['content']}</p>"
                 html += "</body></html>"
-                st.download_button("Download HTML", html.encode(), f"{name}.html","text/html")
-
-#////////////////////////////////////////deal//////////////////////////////////////////////////
-import re
-import streamlit as st
+                st.download_button("Download HTML", html.encode(), f"{name}.html", "text/html")
 
 def deal_structuring_ui(conn):
     """Enhanced deal structuring with persistent strategy chat until cleared."""
     st.header("💡 Creative Deal Structuring Bot")
     st.markdown("Get AI-powered strategies for your property deals")
 
-    # Initialize memory
+    # Initialize session state
     if "deal_strategy_memory" not in st.session_state:
         st.session_state.deal_strategy_memory = []
         st.session_state.last_strategies = None
+        st.session_state.strategy_confidences = {}  # Track confidences per strategy
 
     # Clear chat
     if st.button("Clear Strategies", key="clear_strategies"):
         st.session_state.deal_strategy_memory.clear()
         st.session_state.last_strategies = None
+        st.session_state.strategy_confidences = {}
+        st.rerun()
 
     # Replay chat history
     for role, msg in st.session_state.deal_strategy_memory:
@@ -505,7 +574,7 @@ def deal_structuring_ui(conn):
             f"Generate {risk_tolerance.lower()} strategies with {creativity_level.lower()} approaches "
             f"for a {timeframe} investment using {capital_available.lower()} capital."
         )
-        with st.spinner("Developing strategies…"):
+        with st.spinner("Developing strategies..."):
             if ai_model == "Gemini":
                 strategies = call_gemini("deal_strategy", prompt)
             else:
@@ -521,6 +590,22 @@ def deal_structuring_ui(conn):
         st.chat_message("assistant").write(strategies)
         st.subheader("Recommended Strategies")
         st.markdown(strategies)
+
+        # Initialize confidences for each strategy
+        matches = re.findall(
+            r"Strategy\s+(\d+):\s*(.*?)(?=(?:Strategy\s+\d+:)|\Z)",
+            strategies,
+            flags=re.S
+        )
+        if matches:
+            for num, _ in matches:
+                strategy_key = f"Strategy {num}"
+                if strategy_key not in st.session_state.strategy_confidences:
+                    st.session_state.strategy_confidences[strategy_key] = 7  # Default confidence
+        else:
+            # Fallback if no numbered sections found
+            if "Strategy 1" not in st.session_state.strategy_confidences:
+                st.session_state.strategy_confidences["Strategy 1"] = 7
 
     # Strategy evaluation & refinement
     strategies = st.session_state.get("last_strategies")
@@ -545,14 +630,16 @@ def deal_structuring_ui(conn):
         st.markdown(f"**{selected_label}**")
         st.markdown(selected_text)
 
-        # Use a cleaned key for per-strategy confidence
-        conf_key = f"conf_{selected_label.replace(' ', '_')}"
-        if conf_key not in st.session_state:
-            st.session_state[conf_key] = 7
-        # Slider without explicit default value argument
+        # Confidence slider - gets/sets value from session state
         confidence = st.slider(
-            "Confidence in this strategy", 1, 10, key=conf_key
+            "Confidence in this strategy", 
+            1, 10, 
+            value=st.session_state.strategy_confidences.get(selected_label, 7),
+            key=f"conf_{selected_label.replace(' ', '_')}"
         )
+        
+        # Update confidence in session state
+        st.session_state.strategy_confidences[selected_label] = confidence
 
         if st.button("Refine Strategy", key="refine_strat"):
             feedback = f"{selected_label} with confidence {confidence}/10"
@@ -576,160 +663,337 @@ def deal_structuring_ui(conn):
             st.chat_message("assistant").write(refinement)
             save_interaction(conn, "deal_strategy_refinement", selected_text, refinement)
 
-# ─── Offer Generator ───────────────────────────────────────────────────────────
-def offer_generator_ui(conn):
-    """Enhanced offer generator with templates"""
-    st.header("✍️ Offer Generator Bot")
-    st.markdown("Create professional property purchase offers")
 
-    # Input method selection
-    input_method = st.radio(
-        "Input Method",
-        ["Guided Form", "Free Text", "Upload Existing Offer"],
-        horizontal=True
+# -------------------------------------------------offer generator----------------------------------------------------------------------------------
+
+import streamlit as st
+import io
+import json
+import docx
+from fpdf import FPDF
+from datetime import datetime
+from PyPDF2 import PdfReader
+
+
+def build_guided_prompt(details: dict, detail_level: str) -> str:
+    """
+    Construct a detailed prompt from guided form data to generate a real estate purchase agreement.
+    """
+    buyer = details['parties']['buyer']
+    buyer_rep = details['parties'].get('buyer_rep', '')
+    seller = details['parties']['seller']
+    seller_rep = details['parties'].get('seller_rep', '')
+    buyer_line = f"- Buyer: {buyer}{f' (Represented by: {buyer_rep})' if buyer_rep else ''}"
+    seller_line = f"- Seller: {seller}{f' (Represented by: {seller_rep})' if seller_rep else ''}"
+
+    address = details['property']['address']
+    county = details['property'].get('county', '')
+    address_line = f"- Property Address: {address}"
+    county_line = f"- County: {county}" if county else ''
+
+    price = details['financial']['price_fmt']
+    earnest = details['financial']['earnest_fmt']
+    price_line = f"- Purchase Price: {price}"
+    earnest_line = f"- Earnest Money Deposit: {earnest}"
+
+    closing = details['dates']['closing']
+    expiry = details['dates']['expiry']
+    closing_line = f"- Proposed Closing Date: {closing}"
+    expiry_line = f"- Offer Expiration: {expiry} hours from signing"
+
+    financing = details['terms'].get('financing', '')
+    contingencies = details['terms'].get('contingencies', [])
+    contingencies_str = ', '.join(contingencies) if contingencies else 'None'
+    special_terms = details['terms'].get('special', '')
+    financing_line = f"- Financing Type: {financing}"
+    contingencies_line = f"- Contingencies: {contingencies_str}"
+    special_line = f"- Special Terms: {special_terms}" if special_terms else ''
+
+    jurisdiction = details['terms'].get('jurisdiction', '')
+    jurisdiction_line = f"- Governing Law: {jurisdiction}" if jurisdiction else ''
+
+    sections = [
+        "Generate a professional real estate purchase agreement with the following details:",
+        buyer_line, seller_line, address_line, county_line,
+        price_line, earnest_line, closing_line, expiry_line,
+        financing_line, contingencies_line, special_line, jurisdiction_line,
+        f"Level of Detail: {detail_level}."
+    ]
+    return "\n".join([s for s in sections if s])
+
+
+def offer_generator_ui(conn):
+    st.header("✍️ Advanced Offer Generator")
+    st.markdown(
+        """
+        <style>
+        .offer-section { background-color: #f0f2f6; border-radius: 10px; padding: 15px; margin-bottom: 20px; }
+        .offer-highlight { background-color: #fffacd; padding: 2px 5px; border-radius: 3px; }
+        </style>
+        """, unsafe_allow_html=True
     )
 
-    ai_model = st.radio("AI Model", ["Gemini", "Mistral"], horizontal=True)
-    offer = None  # Initialize offer variable to track offer content
+    if 'offer_stage' not in st.session_state:
+        st.session_state.update({
+            'offer_stage': 'input_method',
+            'offer_data': {},
+            'generated_offer': None,
+            'edited_offer': None,
+            'review_comments': []
+        })
 
-    if input_method == "Guided Form":
-        with st.form("offer_details"):
-            col1, col2 = st.columns(2)
-            with col1:
-                buyer_name = st.text_input("Buyer Name")
-                property_address = st.text_input("Property Address")
-                purchase_price = st.number_input("Purchase Price", min_value=1000)
-            with col2:
-                seller_name = st.text_input("Seller Name")
-                closing_date = st.date_input("Proposed Closing Date")
-                earnest_money = st.number_input("Earnest Money Deposit", min_value=0)
+    stages = ["input_method", "details_entry", "offer_generation", "review_edit", "export"]
+    labels = ["Input Method", "Details Entry", "Offer Generation", "Review & Edit", "Export"]
+    idx = stages.index(st.session_state.offer_stage)
+    cols = st.columns(len(stages))
+    for i, label in enumerate(labels):
+        with cols[i]:
+            if i < idx:
+                st.success(f"✓ {label}")
+            elif i == idx:
+                st.info(f"→ {label}")
+            else:
+                st.caption(label)
 
-            # Additional terms
-            financing = st.selectbox(
-                "Financing Type",
-                ["Cash", "Conventional Loan", "FHA", "VA", "Seller Financing", "Other"]
+    # Stage 1: Input Method
+    if st.session_state.offer_stage == 'input_method':
+        st.markdown("### 1. Select Input Method")
+        method = st.radio(
+            "How would you like to create your offer?",
+            ["Guided Form", "Free Text", "Upload Existing", "Template Library"],
+            horizontal=True,
+            key="offer_input_method"
+        )
+        st.session_state.offer_data['input_method'] = method
+        with st.expander("AI Configuration"):
+            ai_model = st.radio(
+                "AI Model Preference", ["Gemini", "Mistral"], horizontal=True, key="offer_ai_model"
             )
-            contingencies = st.multiselect(
-                "Contingencies",
-                ["Inspection", "Appraisal", "Financing", "Title Review", "Other"]
+            creativity = st.slider("Creativity Level", 0.0, 1.0, 0.3, key="offer_creativity")
+            detail_level = st.select_slider(
+                "Detail Level", options=["Minimal","Standard","Comprehensive"],
+                value="Standard", key="offer_detail_level"
             )
-            special_terms = st.text_area("Special Terms")
+            st.session_state.offer_data.update({
+                'ai_model': ai_model,
+                'creativity': creativity,
+                'detail_level': detail_level
+            })
+        if st.button("Continue to Details", key="btn_continue_details"): 
+            st.session_state.offer_stage = 'details_entry'
+            st.rerun()
 
-            if st.form_submit_button("Generate Offer"):
-                offer_data = {
-                    "buyer": buyer_name,
-                    "seller": seller_name,
-                    "property": property_address,
-                    "price": f"${purchase_price:,}",
-                    "closing_date": closing_date.strftime("%B %d, %Y"),
-                    "earnest_money": f"${earnest_money:,}",
-                    "financing": financing,
-                    "contingencies": contingencies,
-                    "special_terms": special_terms
-                }
-                prompt = (
-                    "Generate a professional real estate purchase agreement based on these details:\n\n"
-                    f"{json.dumps(offer_data, indent=2)}"
-                )
-
-                with st.spinner("Drafting offer..."):
-                    if ai_model == "Gemini":
-                        offer = call_gemini("offer_generator", prompt)
+    # Stage 2: Details Entry
+    elif st.session_state.offer_stage == 'details_entry':
+        st.markdown("### 2. Enter Offer Details")
+        method = st.session_state.offer_data['input_method']
+        if method == 'Guided Form':
+            with st.form("offer_details_form"):
+                st.markdown('<div class="offer-section">', unsafe_allow_html=True)
+                st.markdown('#### Basic Information')
+                c1, c2, c3 = st.columns(3)
+                with c1:
+                    buyer = st.text_input("Buyer Full Name*", key="offer_buyer")
+                    buyer_rep = st.text_input("Buyer's Representative", key="offer_buyer_rep")
+                with c2:
+                    seller = st.text_input("Seller Full Name*", key="offer_seller")
+                    seller_rep = st.text_input("Seller's Representative", key="offer_seller_rep")
+                with c3:
+                    address = st.text_input("Property Address*", key="offer_address")
+                    county = st.text_input("County", key="offer_county")
+                st.markdown('#### Financial Terms')
+                c1, c2, c3 = st.columns(3)
+                with c1:
+                    price = st.number_input("Purchase Price*", min_value=1000, step=1000, key="offer_price")
+                with c2:
+                    earnest = st.number_input("Earnest Money Deposit*", min_value=0, step=1000, key="offer_earnest")
+                with c3:
+                    closing = st.date_input("Proposed Closing Date*", min_value=datetime.now().date(), key="offer_closing")
+                st.markdown('#### Terms & Conditions')
+                c1, c2 = st.columns(2)
+                with c1:
+                    financing = st.selectbox("Financing Type*", ["Cash","Conventional Loan","FHA","VA","Seller Financing","Other"], key="offer_financing")
+                    if financing == "Other": st.text_input("Specify Financing Type", key="offer_financing_other")
+                with c2:
+                    cont = st.multiselect("Contingencies", ["Inspection","Appraisal","Financing","Title Review","HOA Approval","Other"], key="offer_contingencies")
+                    if "Other" in cont: st.text_input("Specify Other Contingency", key="offer_contingencies_other")
+                st.markdown('#### Additional Provisions')
+                terms = st.text_area("Special Terms/Conditions", key="offer_special_terms")
+                st.markdown('#### Jurisdiction & Expiry')
+                c1, c2 = st.columns(2)
+                with c1:
+                    jurisdiction = st.selectbox("Governing Law", ["State Default","California","Texas","New York","Florida","Other"], key="offer_jurisdiction")
+                with c2:
+                    expiry = st.number_input("Offer Expiration (hours)", min_value=1, max_value=168, value=48, key="offer_expiry")
+                st.markdown('</div>', unsafe_allow_html=True)
+                if st.form_submit_button("Generate Offer Draft"):
+                    missing=[]
+                    for field,msg in {"offer_buyer":"Buyer required","offer_seller":"Seller required","offer_address":"Address required","offer_price":"Price >=1000","offer_earnest":"Earnest required","offer_closing":"Closing date required"}.items():
+                        if not st.session_state.get(field): missing.append(msg)
+                    if missing: [st.error(m) for m in missing]
                     else:
-                        messages = [
-                            {"role": "system", "content": "You are a real estate attorney. Draft a professional purchase agreement."},
-                            {"role": "user", "content": prompt}
-                        ]
-                        offer = call_mistral(messages=messages)
-                    save_interaction(conn, "offer_generator", prompt, offer)
+                        st.session_state.offer_data['details']={
+                            'parties':{'buyer':buyer,'buyer_rep':buyer_rep,'seller':seller,'seller_rep':seller_rep},
+                            'property':{'address':address,'county':county},
+                            'financial':{'price':price,'earnest':earnest,'price_fmt':f"${{price:,}}",'earnest_fmt':f"${{earnest:,}}"},
+                            'dates':{'closing':closing.strftime("%B %d, %Y"),'expiry':expiry},
+                            'terms':{'financing':financing,'contingencies':cont,'special':terms,'jurisdiction':jurisdiction}
+                        }
+                        st.session_state.offer_stage='offer_generation'
+                        st.rerun()
 
-                st.subheader("Generated Offer")
-                st.markdown(offer)
 
-    elif input_method == "Free Text":
-        free_text = st.text_area("Enter all relevant deal details")
-        if st.button("Generate from Text"):
-            with st.spinner("Creating offer..."):
-                if ai_model == "Gemini":
-                    offer = call_gemini("offer_generator", free_text)
-                else:
-                    messages = [
-                        {"role": "system", "content": "Create a property purchase offer from these details."},
-                        {"role": "user", "content": free_text}
-                    ]
-                    offer = call_mistral(messages=messages)
-                save_interaction(conn, "offer_generator", free_text, offer)
-            st.subheader("Generated Offer")
-            st.markdown(offer)
+    # Stage 3: Offer Generation
+    if st.session_state.offer_stage == 'offer_generation':
+        d = st.session_state.offer_data
+        if d['input_method'] == 'Guided Form':
+            prompt = build_guided_prompt(d['details'], d['detail_level'])
+        elif d['input_method'] == 'Free Text':
+            prompt = f"Draft a purchase agreement:\n\n{d['details']['free_text']}"
+        elif d['input_method'] == 'Upload Existing':
+            prompt = f"Improve this draft:\n\n{d['details']['uploaded']}"
+        else:
+            prompt = f"Generate from template:\n\n{json.dumps(d['details'], indent=2)}"
+        prompt += f"\n\nDetail Level: {d['detail_level']}"
 
-    else:  # Upload Existing Offer
-        uploaded = st.file_uploader("Upload Existing Offer", type=["pdf", "docx"])
-        if uploaded and st.button("Analyze & Improve"):
-            with st.spinner("Processing document..."):
-                if uploaded.type == "application/pdf":
-                    reader = PdfReader(uploaded)
-                    text = "\n".join(page.extract_text() or "" for page in reader.pages)
-                else:
-                    document = docx.Document(uploaded)
-                    text = "\n".join(p.text for p in document.paragraphs)
+        with st.spinner("Generating..."):
+            if d['ai_model'] == 'Gemini':
+                offer = call_gemini('offer_generator', prompt)
+            else:
+                offer = call_mistral([
+                    {'role': 'system', 'content': 'You are a real estate attorney.'},
+                    {'role': 'user', 'content': prompt}
+                ], temperature=d['creativity'])
+            st.session_state.generated_offer = offer
+            save_interaction(conn, 'offer_generator', prompt, offer)
 
-                if ai_model == "Gemini":
-                    analysis = call_gemini(
-                        "offer_generator",
-                        f"Analyze this existing offer and suggest improvements:\n\n{text}"
-                    )
-                else:
-                    messages = [
-                        {"role": "system", "content": "Review this property offer and suggest improvements."},
-                        {"role": "user", "content": text}
-                    ]
-                    analysis = call_mistral(messages=messages)
-                save_interaction(conn, "offer_analysis", text, analysis)
+        st.subheader("Generated Offer")
+        st.markdown(offer, unsafe_allow_html=True)
+        if st.button("Proceed to Review"): st.session_state.offer_stage = 'review_edit'; st.rerun()
+        if st.button("← Back"): st.session_state.offer_stage = 'details_entry'; st.rerun()
 
-            st.subheader("Suggested Improvements")
-            st.markdown(analysis)
 
-    # Export options (Make sure offer is generated before this step)
-    if offer:
-        export_col1, export_col2 = st.columns(2)
-        with export_col1:
-            export_format = st.selectbox("Export As", ["PDF", "Word", "Text"])
-        with export_col2:
-            export_name = st.text_input("File Name", "property_offer")
+    # Stage 3: Offer Generation
+    if st.session_state.offer_stage == 'offer_generation':
+        d = st.session_state.offer_data
+        if d['input_method'] == 'Guided Form':
+            prompt = build_guided_prompt(d['details'], d['detail_level'])
+        elif d['input_method'] == 'Free Text':
+            prompt = f"Draft a purchase agreement:\n\n{d['details']['free_text']}"
+        elif d['input_method'] == 'Upload Existing':
+            prompt = f"Improve this draft:\n\n{d['details']['uploaded']}"
+        else:
+            prompt = f"Generate from template:\n\n{json.dumps(d['details'], indent=2)}"
+        prompt += f"\n\nDetail Level: {d['detail_level']}"
 
-        if st.button("Export Offer"):
-            if export_format == "PDF":
+        with st.spinner("Generating..."):
+            if d['ai_model'] == 'Gemini':
+                offer = call_gemini('offer_generator', prompt)
+            else:
+                offer = call_mistral([
+                    {'role': 'system', 'content': 'You are a real estate attorney.'},
+                    {'role': 'user', 'content': prompt}
+                ], temperature=d['creativity'])
+            st.session_state.generated_offer = offer
+            save_interaction(conn, 'offer_generator', prompt, offer)
+
+        st.subheader("Generated Offer")
+        st.markdown(offer, unsafe_allow_html=True)
+        if st.button("Proceed to Review"):
+            st.session_state.offer_stage = 'review_edit'
+            st.rerun()
+        if st.button("← Back"):
+            st.session_state.offer_stage = 'details_entry'
+            st.rerun()
+
+    # Stage 4: Review & Edit
+    if st.session_state.offer_stage == 'review_edit':
+        edited = st.text_area(
+            "Edit draft", value=st.session_state.generated_offer,
+            height=300, key='offer_edit'
+        )
+        if edited != st.session_state.edited_offer:
+            st.session_state.edited_offer = edited
+
+        st.markdown("#### Comments")
+        new_c = st.text_input("Add comment", key='offer_new_comment')
+        if st.button("Add Comment") and new_c:
+            ts = datetime.now().strftime("%Y-%m-%d %H:%M")
+            st.session_state.review_comments.append({
+                'ts': ts, 'text': new_c, 'resolved': False
+            })
+            st.rerun()
+
+        for i, c in enumerate(st.session_state.review_comments):
+            cols = st.columns([1, 8, 1])
+            with cols[0]:
+                st.markdown(f"**{c['ts']}**")
+            with cols[1]:
+                st.markdown(f"{'✓' if c['resolved'] else '◯'} {c['text']}")
+            with cols[2]:
+                if not c['resolved'] and st.button('Resolve', key=f'res_{i}'):
+                    c['resolved'] = True
+                    st.rerun()
+
+        if st.button('← Back'):
+            st.session_state.offer_stage = 'offer_generation'
+            st.rerun()
+        if st.button('Proceed to Export'):
+            st.session_state.offer_stage = 'export'
+            st.rerun()
+
+    # Stage 5: Export
+    if st.session_state.offer_stage == 'export':
+        content = st.session_state.edited_offer or st.session_state.generated_offer
+        if st.checkbox('Include Comments', value=True):
+            content += (
+                "\n\n---\n## Comments\n" +
+                "\n".join([f"- [{c['ts']}] {c['text']}" for c in st.session_state.review_comments])
+            )
+
+        fmt = st.selectbox('Format', ['PDF', 'Word', 'Text', 'HTML'], key='offer_export_format')
+        name = st.text_input('File Name', 'property_offer', key='offer_export_name')
+
+        if st.button('Download'):
+            if fmt == 'PDF':
                 pdf = FPDF()
                 pdf.add_page()
-                pdf.set_font("Arial", size=12)
-                for line in offer.split("\n"):
-                    pdf.multi_cell(0, 10, line)
-                pdf_bytes = pdf.output(dest="S").encode("latin-1")
+                pdf.set_font('Arial', size=12)
+                for line in content.split('\n'):
+                    pdf.multi_cell(0, 6, line.encode('latin-1', 'replace').decode('latin-1'))
                 st.download_button(
-                    "Download PDF",
-                    data=pdf_bytes,
-                    file_name=f"{export_name}.pdf",
-                    mime="application/pdf",
+                    'Download PDF', pdf.output(dest='S').encode('latin-1'),
+                    f"{name}.pdf", "application/pdf"
                 )
-            elif export_format == "Word":
+            elif fmt == 'Word':
                 doc = docx.Document()
-                doc.add_heading("Property Purchase Offer", level=1)
-                doc.add_paragraph(offer)
-                bio = io.BytesIO()
-                doc.save(bio)
+                for line in content.split('\n'):
+                    doc.add_paragraph(line)
+                buf = io.BytesIO()
+                doc.save(buf)
                 st.download_button(
-                    "Download Word",
-                    data=bio.getvalue(),
-                    file_name=f"{export_name}.docx",
-                    mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                    'Download Word', buf.getvalue(),
+                    f"{name}.docx",
+                    'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
+                )
+            elif fmt == 'HTML':
+                html = f"<pre>{content}</pre>"
+                st.download_button(
+                    'Download HTML', html.encode(),
+                    f"{name}.html", 'text/html'
                 )
             else:
                 st.download_button(
-                    "Download Text",
-                    data=offer.encode("utf-8"),
-                    file_name=f"{export_name}.txt",
-                    mime="text/plain",
+                    'Download Text', content.encode(),
+                    f"{name}.txt", 'text/plain'
                 )
+
+        if st.button('Start New'):
+            for k in list(st.session_state.keys()):
+                if k.startswith('offer_'):
+                    del st.session_state[k]
+            st.rerun()
+
 
 # ─── Admin Portal ──────────────────────────────────────────────────────────────
 def admin_portal_ui(conn):
