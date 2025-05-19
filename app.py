@@ -4,6 +4,7 @@ import os
 import sqlite3
 import time
 import bcrypt
+import docx
 from fpdf import FPDF
 import google.generativeai as genai
 from PyPDF2 import PdfReader
@@ -18,7 +19,11 @@ import requests
 import pytesseract
 from pdf2image import convert_from_bytes
 import re
-from docx import Document
+try:
+    from docx import Document
+except ImportError:
+    Document = None  # python-docx not installed or conflicting package
+
 
 
 # ─── Configuration ──────────────────────────────────────────────────────────────
