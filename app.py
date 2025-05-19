@@ -4,7 +4,6 @@ import os
 import sqlite3
 import time
 import bcrypt
-import docx
 from fpdf import FPDF
 import google.generativeai as genai
 from PyPDF2 import PdfReader
