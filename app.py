@@ -19,10 +19,10 @@ import requests
 import pytesseract
 from pdf2image import convert_from_bytes
 import re
-try:
-    from docx import Document
-except ImportError:
-    Document = None  # python-docx not installed or conflicting package
+# try:
+#     from docx import Document
+# except ImportError:
+#     Document = None  # python-docx not installed or conflicting package
 
 
 
@@ -892,7 +892,7 @@ def offer_generator_ui(conn):
                 elif uploaded.type == "text/plain":
                     doc_text = uploaded.read().decode("utf-8")
                 else:
-                    doc = Document(uploaded)
+                    # doc = Document(uploaded)
                     doc_text = "\n".join(p.text for p in doc.paragraphs)
                 st.session_state.offer_data['details'] = {'uploaded': doc_text}
                 st.session_state.offer_stage = 'offer_generation'
