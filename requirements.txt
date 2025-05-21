@@ -1,5 +1,5 @@
 bcrypt
-docx
+python-docx
 fpdf
 google-generativeai
 PyPDF2
@@ -10,3 +10,9 @@ mistralai
 requests
 pytesseract
 pdf2image
+openai
+Pillow
+pdfplumber
+torch
+torchvision
+transformers
