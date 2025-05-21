@@ -4,6 +4,7 @@ import os
 import sqlite3
 import time
 import bcrypt
+import docx
 from fpdf import FPDF
 import google.generativeai as genai
 from PyPDF2 import PdfReader
@@ -519,6 +520,22 @@ def extract_text_from_file(f, ocr_model=None, ocr_threshold: int = 100) -> str:
 def lease_summarization_ui(conn):
     """Advanced Lease Summarization with Multi-Stage Analysis"""
     st.header("📄 Advanced Lease Analysis Suite")
+
+    # Replace alert container with an expander for collapsible dropdown-style UI
+    with st.expander("⚠️ Important Note About PDF Quality",expanded=True):
+        st.warning("For best results, please upload searchable PDFs only.")
+        st.markdown("Non-searchable (scanned/image-based) PDFs may produce poor extraction results.")
+
+        st.markdown("##### If you don't have a searchable PDF:")
+        st.markdown("1. Use our **OCR PDF Converter tool** (in the navigation menu)")
+        st.markdown("2. Or convert your file using [ILovePDF's free OCR tool](https://www.ilovepdf.com/ocr-pdf)")
+
+        st.markdown("##### Signs of a non-searchable PDF:")
+        st.markdown("- You can't select or highlight text in the document")
+        st.markdown("- The file was created by scanning paper documents")
+        st.markdown("- The document appears as an image when opened")
+
+    # Optional: Retain styling for lease sections and risk indicators
     st.markdown("""
     <style>
         .lease-section {
@@ -533,6 +550,7 @@ def lease_summarization_ui(conn):
         .risk-low { background-color: #d4edda; }
     </style>
     """, unsafe_allow_html=True)
+
 
     # Initialize session state for multi-document analysis
     if "lease_docs" not in st.session_state:
@@ -822,7 +840,7 @@ def extract_dates(date_text):
     dates = {}
     for line in date_text.split('\n'):
         if "-" in line and ("/" in line or any(month in line for month in [
-            "Jan", "Feb", "Mar", "Apr", "May", "Jun", 
+            "Jan", "Feb", "Mar", "Apr", "May", "Jun",
             "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"
         ])):
             parts = line.split("-")
@@ -862,7 +880,7 @@ def resolve_ensemble(results):
     result_texts = [r for r in results if r.strip()]
     if not result_texts:
         return ""
-    
+
     # For structured data, find most common elements
     if all("\n- " in r for r in result_texts):
         all_items = []
@@ -872,7 +890,7 @@ def resolve_ensemble(results):
         counter = Counter(all_items)
         most_common = counter.most_common()
         return "\n".join([item for item, count in most_common if count > 1])
-    
+
     # For free text, return the longest result (most detailed)
     return max(result_texts, key=len)
 
@@ -911,7 +929,7 @@ def build_analysis_prompt(component, text, mode, jurisdiction, risk, custom_inst
             f"Flag any unusually restrictive terms. {custom_instructions}"
         )
     }
-    
+
     base_prompt = (
         f"Perform {component} analysis on this lease agreement.\n"
         f"Analysis Mode: {mode}\n"
