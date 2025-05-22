@@ -348,759 +348,159 @@ def save_interaction(conn, feature: str, input_text: str, output_text: str):
             (st.session_state.username, feature, input_text, output_text),
         )
         conn.commit()
-# ─── Summarization Utility ─────────────────────────────────────────────────────
-def chunk_text(text: str, max_chars: int = 2000) -> List[str]:
-    """Split text into manageable chunks for AI summarization."""
-    return [text[i : i + max_chars] for i in range(0, len(text), max_chars)]
 
-
-# ─── Helper: Load OCR Model ─────────────────────────────────────────────────
-
-def load_ocr_model(model_path: str):
-    """Attempt to load a custom OCR model; return None on failure"""
-    if not os.path.exists(model_path):
-        st.warning("OCR model not found; using Tesseract fallback.")
-        return None
-    try:
-        model = torch.load(model_path, map_location="cpu")
-        if isinstance(model, torch.nn.Module):
-            model.eval()
-            return model
-    except:
-        pass
-    try:
-        from models import OCRModel
-        state = torch.load(model_path, map_location="cpu")
-        m = OCRModel()
-        m.load_state_dict(state)
-        m.eval()
-        return m
-    except Exception as e:
-        st.error(f"Failed to load OCR model: {e}")
-    return None
-
-
-# ─── Helper: Load OCR Model ─────────────────────────────────────────────────
-
-def load_ocr_model(model_name: str = "naver-clova-ix/donut-base-finetuned-cord-v2"):
-    """Load a Hugging Face OCR model; return None on failure"""
-    try:
-        from transformers import DonutProcessor, VisionEncoderDecoderModel
-
-        processor = DonutProcessor.from_pretrained(model_name)
-        model = VisionEncoderDecoderModel.from_pretrained(model_name)
-        return (processor, model)
-    except Exception as e:
-        st.error(f"Failed to load Hugging Face OCR model: {e}")
-
-    # Fallback to TrOCR if Donut fails
-    try:
-        from transformers import TrOCRProcessor, VisionEncoderDecoderModel
-        processor = TrOCRProcessor.from_pretrained("microsoft/trocr-base-printed")
-        model = VisionEncoderDecoderModel.from_pretrained("microsoft/trocr-base-printed")
-        return (processor, model)
-    except Exception as e:
-        st.error(f"Failed to load TrOCR model: {e}")
-
-    return None
-
-
-# ─── Helper: Predict Text With Model ─────────────────────────────────────────
-
-def predict_text_with_model(img: Image.Image, model_tuple) -> str:
-    """Run Hugging Face OCR model on an image; return empty string on failure"""
-    if model_tuple is None:
-        return ""
-
-    processor, model = model_tuple
-
-    try:
-        # Convert image to RGB if needed
-        if img.mode != "RGB":
-            img = img.convert("RGB")
-
-        # Process image based on model type
-        if isinstance(processor, DonutProcessor):
-            # Donut model processing
-            pixel_values = processor(img, return_tensors="pt").pixel_values
-            task_prompt = "<s_cord-v2>"
-            decoder_input_ids = processor.tokenizer(
-                task_prompt, add_special_tokens=False, return_tensors="pt"
-            ).input_ids
-
-            with torch.no_grad():
-                outputs = model.generate(
-                    pixel_values,
-                    decoder_input_ids=decoder_input_ids,
-                    max_length=model.decoder.config.max_position_embeddings,
-                    early_stopping=True,
-                    pad_token_id=processor.tokenizer.pad_token_id,
-                    eos_token_id=processor.tokenizer.eos_token_id,
-                    use_cache=True,
-                    num_beams=1,
-                    bad_words_ids=[[processor.tokenizer.unk_token_id]],
-                    return_dict_in_generate=True,
-                )
-
-            sequence = processor.batch_decode(outputs.sequences)[0]
-            sequence = sequence.replace(processor.tokenizer.eos_token, "").replace(processor.tokenizer.pad_token, "")
-            sequence = re.sub(r"<.*?>", "", sequence, count=1).strip()  # remove first task start token
-            return sequence
-
-        else:
-            # TrOCR model processing
-            pixel_values = processor(img, return_tensors="pt").pixel_values
-            generated_ids = model.generate(pixel_values)
-            return processor.batch_decode(generated_ids, skip_special_tokens=True)[0]
-
-    except Exception as e:
-        st.warning(f"Hugging Face OCR prediction failed: {e}")
-        return ""
-
-
-# ─── Helper: Extract PDF/Text/Image ────────────────────────────────────────────
-
-def extract_text_from_file(f, ocr_model=None, ocr_threshold: int = 100) -> str:
-    """
-    Extract text from PDF, image, or DOCX using Hugging Face models.
-    """
-    raw = f.read()
-    text = ""
-
-    # PDF processing
-    if f.type == "application/pdf":
-        try:
-            # First try traditional text extraction
-            reader = PdfReader(io.BytesIO(raw))
-            pages = [p.extract_text() or '' for p in reader.pages]
-            text = '\n'.join(pages)
-
-            # If text extraction is insufficient, try OCR
-            if len(text.strip()) < ocr_threshold and ocr_model:
-                images = convert_from_bytes(raw)
-                ocrs = []
-                for img in images:
-                    ocrs.append(predict_text_with_model(img, ocr_model))
-                text = '\n'.join(ocrs)
-
-        except Exception as e:
-            st.warning(f"PDF processing error: {e}")
-            text = ''
-
-    # Image processing
-    elif f.type.startswith("image/"):
-        try:
-            img = Image.open(io.BytesIO(raw))
-            if ocr_model:
-                text = predict_text_with_model(img, ocr_model)
-            else:
-                text = pytesseract.image_to_string(img)
-        except Exception as e:
-            st.warning(f"Image processing error: {e}")
-            text = ''
-
-    # DOCX processing (unchanged)
-    elif f.type == "application/vnd.openxmlformats-officedocument.wordprocessingml.document":
-        try:
-            import docx
-            doc = docx.Document(io.BytesIO(raw))
-            text = '\n'.join(p.text for p in doc.paragraphs)
-        except Exception:
-            text = ''
-
-    # Plain text fallback
-    else:
-        try:
-            text = raw.decode('utf-8')
-        except:
-            text = ''
-
-    return ' '.join(text.split())
 
 def lease_summarization_ui(conn):
-    """Advanced Lease Summarization with Multi-Stage Analysis"""
-    st.header("📄 Advanced Lease Analysis Suite")
+    """Lease Summarization: upload PDF and get either full-document or page-by-page summaries with model selection, persisting results for chatbot usage."""
+    import streamlit as st
+    from PyPDF2 import PdfReader
+    import json
 
-    # Replace alert container with an expander for collapsible dropdown-style UI
-    with st.expander("⚠️ Important Note About PDF Quality",expanded=True):
-        st.warning("For best results, please upload searchable PDFs only.")
-        st.markdown("Non-searchable (scanned/image-based) PDFs may produce poor extraction results.")
-
-        st.markdown("##### If you don't have a searchable PDF:")
-        st.markdown("1. Use our **OCR PDF Converter tool** (in the navigation menu)")
-        st.markdown("2. Or convert your file using [ILovePDF's free OCR tool](https://www.ilovepdf.com/ocr-pdf)")
-
-        st.markdown("##### Signs of a non-searchable PDF:")
-        st.markdown("- You can't select or highlight text in the document")
-        st.markdown("- The file was created by scanning paper documents")
-        st.markdown("- The document appears as an image when opened")
-
-    # Optional: Retain styling for lease sections and risk indicators
-    st.markdown("""
-    <style>
-        .lease-section {
-            background-color: #f8f9fa;
-            border-radius: 8px;
-            padding: 15px;
-            margin-bottom: 15px;
-            border-left: 4px solid #2E86AB;
-        }
-        .risk-high { background-color: #ffdddd; }
-        .risk-medium { background-color: #fff3cd; }
-        .risk-low { background-color: #d4edda; }
-    </style>
-    """, unsafe_allow_html=True)
-
-
-    # Initialize session state for multi-document analysis
-    if "lease_docs" not in st.session_state:
-        st.session_state.lease_docs = {}
-        st.session_state.comparison_matrix = None
-        st.session_state.analysis_stages = []
-
-    # Configuration in expandable sections
-    with st.expander("⚙️ Analysis Configuration", expanded=True):
-        col1, col2, col3 = st.columns(3)
-        with col1:
-            analysis_mode = st.selectbox(
-                "Analysis Mode",
-                ["Standard Review", "Due Diligence", "Risk Assessment", "Full Legal Audit"],
-                index=0,
-                help="Depth of analysis to perform"
-            )
-            jurisdiction = st.selectbox(
-                "Governing Law",
-                ["US (Default)", "UK", "EU", "Australia", "Canada", "Singapore", "UAE"],
-                index=0
-            )
-
-        with col2:
-            risk_profile = st.select_slider(
-                "Risk Sensitivity",
-                options=["Lenient", "Moderate", "Strict", "Aggressive"],
-                value="Moderate"
-            )
-            compare_mode = st.checkbox(
-                "Enable Cross-Document Comparison",
-                value=True,
-                help="Identify inconsistencies across multiple leases"
-            )
-
-        with col3:
-            ai_engine = st.radio(
-                "AI Engine",
-                ["Gemini Pro", "Mistral Large", "DeepSeek", "Ensemble"],
-                horizontal=True,
-                index=0
-            )
-            ocr_fallback = st.checkbox(
-                "Advanced OCR Fallback",
-                value=True,
-                help="Use AI-powered OCR when text extraction fails"
-            )
-
-    # Advanced settings
-    with st.expander("🔧 Advanced Parameters"):
-        col1, col2 = st.columns(2)
-        with col1:
-            chunk_size = st.slider(
-                "Processing Chunk Size (chars)",
-                min_value=500,
-                max_value=4000,
-                value=2000,
-                step=500
-            )
-            temperature = st.slider(
-                "AI Creativity",
-                min_value=0.0,
-                max_value=1.0,
-                value=0.3,
-                step=0.1
-            )
-        with col2:
-            max_parallel = st.slider(
-                "Parallel Processes",
-                min_value=1,
-                max_value=10,
-                value=3,
-                help="Higher values speed up processing but increase resource usage"
-            )
-            confidence_threshold = st.slider(
-                "Confidence Threshold",
-                min_value=50,
-                max_value=95,
-                value=75,
-                help="Minimum confidence score for automatic clause classification"
-            )
-
-    # Document upload section with metadata
-    st.markdown("---")
-    st.subheader("📂 Document Upload & Metadata")
-
-    uploaded_files = st.file_uploader(
-        "Upload Lease Documents",
-        type=["pdf", "docx", "jpg", "png", "tiff"],
-        accept_multiple_files=True,
-        help="Supported formats: PDF, Word, and common image formats"
+    st.header("📄 Lease Summary")
+    st.markdown(
+        "Upload your lease PDF and receive a concise summary—choose to process the entire document at once or summarize each page individually."
     )
 
-    # Document metadata collection
-    if uploaded_files:
-        with st.expander("📝 Document Metadata", expanded=True):
-            cols = st.columns(4)
-            lease_types = ["Commercial", "Residential", "Industrial", "Retail", "Mixed-Use"]
-            doc_metadata = {}
+    # Initialize or clear previous summary when file changes
+    uploaded_file = st.file_uploader(
+        "Upload Lease Document (PDF)", type=["pdf"], key="lease_file_uploader"
+    )
+    if 'last_file' in st.session_state and uploaded_file:
+        if st.session_state.last_file != uploaded_file.name:
+            st.session_state.pop('last_summary', None)
+            st.session_state.pop('last_mode', None)
+            st.session_state.pop('last_pages', None)
+            st.session_state.pop('last_engine', None)
+    
+    if not uploaded_file:
+        return
 
-            for i, file in enumerate(uploaded_files):
-                with st.container():
-                    st.markdown(f"**{file.name}**")
-                    doc_cols = st.columns([2,1,1])
-                    with doc_cols[0]:
-                        doc_metadata[file.name] = {
-                            "type": st.selectbox(
-                                "Lease Type",
-                                lease_types,
-                                index=0,
-                                key=f"type_{i}"
-                            )
-                        }
-                    with doc_cols[1]:
-                        d = st.date_input(
-                            "Effective Date",
-                            key=f"date_{i}"
-                        )
-                        doc_metadata[file.name]["effective_date"] = d.strftime("%Y-%m-%d")
-                    with doc_cols[2]:
-                        doc_metadata[file.name]["parties"] = st.text_input(
-                            "Parties (Optional)",
-                            placeholder="Landlord/Tenant",
-                            key=f"parties_{i}"
-                        )
-
-    # Analysis pipeline configuration
-    st.markdown("---")
-    st.subheader("🔍 Analysis Pipeline")
-
-    analysis_options = st.multiselect(
-        "Select Analysis Components",
-        options=[
-            "Key Term Extraction",
-            "Financial Obligations",
-            "Termination Clauses",
-            "Renewal Options",
-            "Assignment Provisions",
-            "Maintenance Responsibilities",
-            "Insurance Requirements",
-            "Default Provisions",
-            "Force Majeure",
-            "Dispute Resolution",
-            "Compliance Checklist",
-            "Market Benchmarking"
-        ],
-        default=[
-            "Key Term Extraction",
-            "Financial Obligations",
-            "Termination Clauses",
-            "Renewal Options"
-        ]
+    # Model selection
+    ai_engine = st.radio(
+        "Select AI Model",
+        ["DeepSeek", "Gemini Pro", "Mistral Large"],
+        index=0,
+        horizontal=True,
+        key="lease_ai_engine"
+    )
+    # Summary mode selection
+    summary_mode = st.radio(
+        "Summary Mode",
+        ["Full Document", "Page-by-Page"],
+        index=1,
+        horizontal=True,
+        key="lease_summary_mode"
     )
 
-    custom_instructions = st.text_area(
-        "Custom Analysis Instructions",
-        placeholder="E.g., Focus on early termination penalties, highlight any unusual clauses...",
-        height=100
-    )
-
-    # Action buttons
-    st.markdown("---")
-    action_cols = st.columns([1,1,1,2])
-    with action_cols[0]:
-        analyze_btn = st.button("🚀 Analyze Documents", type="primary")
-    with action_cols[1]:
-        compare_btn = st.button("🔍 Compare Documents", disabled=len(uploaded_files) < 2)
-    with action_cols[2]:
-        template_btn = st.button("📋 Generate Summary Template")
-    with action_cols[3]:
-        export_format = st.selectbox(
-            "Export Format",
-            ["PDF Report", "Word Document", "Excel Matrix", "JSON Data"],
-            index=0,
-            label_visibility="collapsed"
-        )
-
-    # Processing logic
-    if analyze_btn and uploaded_files:
-        with st.status("🔍 Processing documents...", expanded=True) as status:
-            progress_bar = st.progress(0)
-            status_text = st.empty()
-            doc_results = {}
-
-            # Process each document
-            for i, file in enumerate(uploaded_files):
-                status_text.markdown(f"**Processing {file.name}** ({i+1}/{len(uploaded_files)})")
-
-                try:
-                    # Extract text
-                    raw_text = extract_text_from_file(file)
-                    if not raw_text.strip():
-                        st.warning(f"Could not extract text from {file.name}")
-                        continue
-
-                    # Store document metadata
-                    doc_results[file.name] = {
-                        "metadata": doc_metadata.get(file.name, {}),
-                        "raw_text": raw_text,
-                        "analysis": {}
-                    }
-
-                    # Process each analysis component
-                    for component in analysis_options:
-                        prompt = build_analysis_prompt(
-                            component,
-                            raw_text,
-                            analysis_mode,
-                            jurisdiction,
-                            risk_profile,
-                            custom_instructions
-                        )
-
-                        # Call AI engine
-                        if ai_engine == "Gemini Pro":
-                            result = call_gemini("lease_analysis", prompt, temperature=temperature)
-                        elif ai_engine == "Mistral Large":
-                            messages = [{"role": "user", "content": prompt}]
-                            result = call_mistral(messages, temperature=temperature)
-                        elif ai_engine == "DeepSeek":
-                            messages = [{"role": "user", "content": prompt}]
-                            result = call_deepseek(messages, temperature=temperature)
-                        else:  # Ensemble
-                            results = []
-                            for model in ["Gemini", "Mistral", "DeepSeek"]:
-                                if model == "Gemini":
-                                    results.append(call_gemini("lease_analysis", prompt))
-                                elif model == "Mistral":
-                                    messages = [{"role": "user", "content": prompt}]
-                                    results.append(call_mistral(messages))
-                                else:
-                                    messages = [{"role": "user", "content": prompt}]
-                                    results.append(call_deepseek(messages))
-                            result = resolve_ensemble(results)
-
-                        doc_results[file.name]["analysis"][component] = result
-
-                    progress_bar.progress((i + 1) / len(uploaded_files))
-
-                except Exception as e:
-                    st.error(f"Error processing {file.name}: {str(e)}")
-                    continue
-
-            st.session_state.lease_docs = doc_results
-            status.update(label="✅ Analysis complete!", state="complete")
-
-        display_lease_results(doc_results, compare_mode)
-        save_interaction(
-            conn,
-            "lease_analysis",
-            f"Analyzed {len(uploaded_files)} documents with {analysis_mode} mode",
-            json.dumps(doc_results, default=str, indent=2)
-        )
-
-    if compare_btn and len(st.session_state.lease_docs) >= 2:
-        with st.spinner("Building comparison matrix..."):
-            comparison_data = build_comparison_matrix(st.session_state.lease_docs)
-            st.session_state.comparison_matrix = comparison_data
-            display_comparison_results(comparison_data)
-
-    if template_btn:
-        with st.spinner("Generating summary template..."):
-            template = generate_summary_template(st.session_state.lease_docs)
-            st.subheader("Executive Summary Template")
-            st.markdown(template)
-            st.download_button(
-                "Download Summary",
-                data=template.encode('utf-8'),
-                file_name="lease_summary_template.md",
-                mime="text/markdown"
-            )
-
-def extract_risks(risk_text):
-    """Extract risk items from analysis text"""
-    risks = {}
-    for line in risk_text.split('\n'):
-        if "RISK:" in line:
-            parts = line.split("RISK:")
-            if len(parts) > 1:
-                risk_level = parts[0].strip().upper()
-                risk_desc = parts[1].strip()
-                risks[risk_desc] = risk_level
-    return risks
-
-def extract_dates(date_text):
-    """Extract key dates from analysis text"""
-    dates = {}
-    for line in date_text.split('\n'):
-        if "-" in line and ("/" in line or any(month in line for month in [
-            "Jan", "Feb", "Mar", "Apr", "May", "Jun",
-            "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"
-        ])):
-            parts = line.split("-")
-            if len(parts) > 1:
-                date_desc = parts[0].strip()
-                date_value = parts[1].strip()
-                dates[date_desc] = date_value
-    return dates
-
-def extract_financial_terms(financial_text):
-    """Extract financial terms from analysis text"""
-    financials = {}
-    for line in financial_text.split('\n'):
-        if "$" in line or "£" in line or "€" in line or "amount" in line.lower():
-            parts = line.split(":")
-            if len(parts) > 1:
-                term = parts[0].strip()
-                value = parts[1].strip()
-                financials[term] = value
-    return financials
-
-def generate_redline(raw_text, analysis):
-    """Generate redline version of lease with annotations"""
-    redline_text = raw_text
-    for component, content in analysis.items():
-        if "Risk" in component:
-            risks = extract_risks(content)
-            for risk_desc, risk_level in risks.items():
-                annotation = f"[{risk_level} RISK: {risk_desc}]"
-                redline_text = redline_text.replace(risk_desc, annotation)
-    return redline_text
-
-def resolve_ensemble(results):
-    """Resolve differences between multiple AI model outputs"""
-    # Simple voting system - take the majority result
-    from collections import Counter
-    result_texts = [r for r in results if r.strip()]
-    if not result_texts:
-        return ""
-
-    # For structured data, find most common elements
-    if all("\n- " in r for r in result_texts):
-        all_items = []
-        for r in result_texts:
-            items = [line.strip() for line in r.split('\n') if line.strip()]
-            all_items.extend(items)
-        counter = Counter(all_items)
-        most_common = counter.most_common()
-        return "\n".join([item for item, count in most_common if count > 1])
-
-    # For free text, return the longest result (most detailed)
-    return max(result_texts, key=len)
-
-def build_analysis_prompt(component, text, mode, jurisdiction, risk, custom_instructions):
-    """Construct detailed prompt for each analysis component"""
-    component_prompts = {
-        "Key Term Extraction": (
-            f"Analyze this lease agreement and extract all key terms. "
-            f"Organize into these categories:\n"
-            f"1. Basic Terms (parties, property, term dates)\n"
-            f"2. Financial Terms (rent, deposits, fees)\n"
-            f"3. Operational Terms (use restrictions, maintenance)\n"
-            f"4. Legal Terms (jurisdiction, dispute resolution)\n\n"
-            f"Present in clear markdown tables with explanations. "
-            f"Highlight any unusual terms. Jurisdiction: {jurisdiction}. "
-            f"Risk sensitivity: {risk}. {custom_instructions}"
-        ),
-        "Financial Obligations": (
-            f"Identify all financial obligations in this lease including:\n"
-            f"- Base rent amount and payment schedule\n"
-            f"- Security deposit and conditions for return\n"
-            f"- Additional fees (CAM, utilities, taxes)\n"
-            f"- Rent escalation clauses\n"
-            f"- Penalties for late payment\n\n"
-            f"Calculate effective annual costs considering all factors. "
-            f"Highlight any unusual or onerous provisions. {custom_instructions}"
-        ),
-        "Termination Clauses": (
-            f"Analyze the termination provisions in this lease. Identify:\n"
-            f"- Early termination options and penalties\n"
-            f"- Notice periods required\n"
-            f"- Conditions for landlord/tenant termination\n"
-            f"- Automatic renewal clauses\n"
-            f"- Holdover provisions\n\n"
-            f"Assess the balance of power in these clauses. "
-            f"Flag any unusually restrictive terms. {custom_instructions}"
-        )
-    }
-
-    base_prompt = (
-        f"Perform {component} analysis on this lease agreement.\n"
-        f"Analysis Mode: {mode}\n"
-        f"Jurisdiction: {jurisdiction}\n"
-        f"Risk Profile: {risk}\n\n"
-        f"Document Excerpt:\n{text[:10000]}\n\n"
-        f"Provide response in structured markdown with clear headings. "
-        f"Include risk ratings where appropriate."
-    )
-    return component_prompts.get(component, base_prompt)
-
-def display_lease_results(results, compare_mode):
-    """Display analysis results with interactive elements"""
-    st.subheader("Analysis Results")
-    tab_names = [f"📄 {name}" for name in results.keys()]
-    tabs = st.tabs(tab_names)
-
-    for i, (doc_name, doc_data) in enumerate(results.items()):
-        with tabs[i]:
-            st.markdown(f"### {doc_name}")
-            st.caption(f"Lease Type: {doc_data['metadata'].get('type', 'Unknown')}")
-
-            # Document overview
-            with st.expander("📋 Document Overview", expanded=True):
-                cols = st.columns(3)
-                with cols[0]:
-                    st.metric("Text Length", f"{len(doc_data['raw_text']):,} chars")
-                with cols[1]:
-                    st.metric("Key Terms", len(doc_data['analysis'].get('Key Term Extraction', '').split('\n')))
-                with cols[2]:
-                    risks = sum(1 for line in doc_data['analysis'].get('Risk Assessment', '').split('\n') if "HIGH" in line)
-                    st.metric("High Risks", risks, delta_color="inverse")
-
-            # Analysis sections
-            for component, content in doc_data['analysis'].items():
-                with st.expander(f"🔍 {component}"):
-                    if "Risk" in component:
-                        display_risk_content(content)
-                    else:
-                        st.markdown(content)
-
-            # Quick actions
-            st.markdown("### Quick Actions")
-            action_cols = st.columns(3)
-            with action_cols[0]:
-                st.download_button(
-                    "Download Analysis",
-                    data=json.dumps(doc_data, indent=2).encode('utf-8'),
-                    file_name=f"{doc_name}_analysis.json",
-                    mime="application/json"
-                )
-            with action_cols[1]:
-                if st.button("Generate Redline", key=f"redline_{i}"):
-                    with st.spinner("Generating redline version..."):
-                        redline = generate_redline(doc_data['raw_text'], doc_data['analysis'])
-                        st.session_state[f"redline_{doc_name}"] = redline
-                        st.rerun()
-            with action_cols[2]:
-                if compare_mode:
-                    st.checkbox("Include in Comparison", value=True, key=f"compare_{i}")
-
-def display_risk_content(content):
-    """Format risk assessment content with color coding"""
-    lines = content.split('\n')
-    for line in lines:
-        if "HIGH RISK" in line:
-            st.markdown(f'<div class="risk-high">{line}</div>', unsafe_allow_html=True)
-        elif "MEDIUM RISK" in line:
-            st.markdown(f'<div class="risk-medium">{line}</div>', unsafe_allow_html=True)
-        elif "LOW RISK" in line:
-            st.markdown(f'<div class="risk-low">{line}</div>', unsafe_allow_html=True)
+    # Display existing summary if available
+    if 'last_summary' in st.session_state and st.session_state.get('last_file') == uploaded_file.name:
+        st.subheader(f"{st.session_state['last_mode']} Summary ({st.session_state['last_engine']})")
+        if st.session_state['last_mode'] == 'Full Document':
+            st.write(st.session_state['last_summary'])
         else:
-            st.write(line)
+            for idx, part in enumerate(st.session_state['last_summary'], start=1):
+                st.markdown(f"**Page {idx} Summary:**")
+                st.write(part)
+        st.divider()
 
-def build_comparison_matrix(docs):
-    """Create a comparison matrix across multiple documents"""
-    comparison = {
-        "metadata": {},
-        "financial_terms": {},
-        "key_dates": {},
-        "risk_factors": {}
-    }
+    # Generate new summary
+    if st.button("Generate Summary", key="lease_generate_button"):
+        try:
+            reader = PdfReader(uploaded_file)
+            pages = [page.extract_text() or "" for page in reader.pages]
+        except Exception:
+            st.error("Failed to extract text from the PDF.")
+            return
 
-    for doc_name, doc_data in docs.items():
-        # Metadata comparison
-        comparison["metadata"][doc_name] = doc_data["metadata"]
+        if not any(pages):
+            st.error("No readable text found in the PDF.")
+            return
 
-        # Financial terms comparison
-        financial_data = extract_financial_terms(doc_data["analysis"].get("Financial Obligations", ""))
-        comparison["financial_terms"][doc_name] = financial_data
+        # Prepare storage
+        st.session_state['last_file'] = uploaded_file.name
+        st.session_state['last_mode'] = summary_mode
+        st.session_state['last_engine'] = ai_engine
 
-        # Key dates comparison
-        dates_data = extract_dates(doc_data["analysis"].get("Key Term Extraction", ""))
-        comparison["key_dates"][doc_name] = dates_data
+        # Full document summary
+        if summary_mode == "Full Document":
+            raw_text = "\n".join(pages)
+            chunks = [raw_text[i:i+15000] for i in range(0, len(raw_text), 15000)] if len(raw_text) > 15000 else [raw_text]
+            parts = []
+            with st.spinner("Summarizing full document..."):
+                for chunk in chunks:
+                    prompt = (
+                        "Summarize this portion of the lease agreement in clear, concise language, "
+                        "preserving all key details:\n\n" + chunk
+                    )
+                    if ai_engine == "DeepSeek":
+                        part = call_deepseek(
+                            messages=[{"role":"user","content":prompt}],
+                            model="deepseek-chat",
+                            temperature=0.3,
+                            max_tokens=1024
+                        )
+                    elif ai_engine == "Gemini Pro":
+                        part = call_gemini(
+                            feature="lease_analysis",
+                            content=prompt,
+                            temperature=0.3
+                        )
+                    else:
+                        part = call_mistral(
+                            messages=[{"role":"user","content":prompt}],
+                            temperature=0.3,
+                            max_tokens=1024
+                        )
+                    parts.append(part)
+                final_output = parts[0] if len(parts) == 1 else "\n\n".join(parts)
+            st.subheader("Full Document Summary")
+            st.write(final_output)
+            save_interaction(conn, "lease_summary_full", uploaded_file.name, final_output)
+            st.session_state['last_summary'] = final_output
 
-        # Risk factors comparison
-        risks_data = extract_risks(doc_data["analysis"].get("Risk Assessment", ""))
-        comparison["risk_factors"][doc_name] = risks_data
-
-    return comparison
-
-def display_comparison_results(comparison):
-    """Display interactive comparison results"""
-    st.subheader("📊 Cross-Document Comparison")
-
-    with st.expander("📋 Metadata Comparison", expanded=True):
-        meta_df = pd.DataFrame(comparison["metadata"]).T
-        st.dataframe(meta_df.style.highlight_max(axis=0, color='#d4edda'))
-
-    with st.expander("💰 Financial Terms Comparison"):
-        financial_df = pd.DataFrame(comparison["financial_terms"]).T
-        st.dataframe(
-            financial_df.style.format("${:,.2f}").highlight_max(axis=0, color='#ffdddd')
-        )
-        fig = px.bar(
-            financial_df,
-            barmode='group',
-            title="Financial Terms Comparison"
-        )
-        st.plotly_chart(fig)
-
-    with st.expander("📅 Key Dates Comparison"):
-        dates_df = pd.DataFrame(comparison["key_dates"]).T
-        st.dataframe(dates_df)
-
-    with st.expander("⚠️ Risk Profile Comparison"):
-        risks_df = pd.DataFrame(comparison["risk_factors"]).T
-        st.dataframe(risks_df.style.highlight_max(axis=0, color='#ffdddd'))
-        fig = px.line_polar(
-            risks_df.reset_index(),
-            r=risks_df.mean(axis=1),
-            theta=risks_df.index,
-            line_close=True,
-            title="Comparative Risk Profiles"
-        )
-        st.plotly_chart(fig)
-
-def generate_summary_template(docs):
-    """Generate an executive summary template from analysis results"""
-    template = "# Lease Portfolio Summary\n\n"
-    template += "## Key Findings\n\n"
-
-    for doc_name, doc_data in docs.items():
-        template += f"### {doc_name}\n"
-        template += f"- **Type**: {doc_data['metadata'].get('type', 'Unknown')}\n"
-
-        # Financial highlights
-        financial = doc_data['analysis'].get('Financial Obligations', '')
-        template += "\n**Financial Highlights**:\n"
-        for line in financial.split('\n')[:5]:
-            if line.strip() and any(c in line for c in ['$', '£', '€']):
-                template += f"- {line}\n"
-
-        # Top risks
-        risks = doc_data['analysis'].get('Risk Assessment', '')
-        high_risks = [line for line in risks.split('\n') if "HIGH" in line]
-        if high_risks:
-            template += "\n**Critical Risks**:\n"
-            for risk in high_risks[:3]:
-                template += f"- {risk.split('HIGH RISK:')[-1].strip()}\n"
-
-        template += "\n---\n"
-
-    if len(docs) > 1:
-        template += "\n## Comparative Analysis\n"
-        template += "Key differences across documents:\n\n"
-        template += "- [Add key differences here]\n"
-        template += "- [Consider creating a comparison table]\n"
-        template += "- [Highlight most favorable terms]\n"
-
-    return template
+        # Page-by-page summary
+        else:
+            summaries = []
+            st.subheader("Page-by-Page Summaries")
+            for idx, page_text in enumerate(pages, start=1):
+                if not page_text.strip():
+                    summaries.append("(no text detected)")
+                    st.markdown(f"**Page {idx}:** _(no text detected)_")
+                    continue
+                with st.spinner(f"Summarizing page {idx}..."):
+                    prompt = (
+                        f"Summarize page {idx} of this lease agreement in clear, concise language, "
+                        f"covering all information:\n\n{page_text}"
+                    )
+                    if ai_engine == "DeepSeek":
+                        summary = call_deepseek(
+                            messages=[{"role":"user","content":prompt}],
+                            model="deepseek-chat",
+                            temperature=0.3,
+                            max_tokens=512
+                        )
+                    elif ai_engine == "Gemini Pro":
+                        summary = call_gemini(
+                            feature="lease_analysis",
+                            content=prompt,
+                            temperature=0.3
+                        )
+                    else:
+                        summary = call_mistral(
+                            messages=[{"role":"user","content":prompt}],
+                            temperature=0.3,
+                            max_tokens=512
+                        )
+                st.markdown(f"**Page {idx} Summary:**")
+                st.write(summary)
+                summaries.append(summary)
+            save_interaction(
+                conn,
+                "lease_summary_pagewise",
+                uploaded_file.name,
+                json.dumps({f"page_{i}": pages[i-1] for i in range(1, len(pages)+1)})
+            )
+            st.session_state['last_summary'] = summaries
 
 def deal_structuring_ui(conn):
     """Enhanced deal structuring with persistent strategy chat until cleared."""
