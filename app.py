@@ -23,6 +23,7 @@ from PIL import Image
 import pdfplumber
 import torch
 from torchvision import transforms
+import uuid
 
 # ─── Configuration ──────────────────────────────────────────────────────────────
 GOOGLE_API_KEY = os.environ.get(
@@ -74,6 +75,18 @@ def init_db(db_path: str = "users.db"):
                 cursor.execute(f"ALTER TABLE users ADD COLUMN {col} TEXT")
             except sqlite3.OperationalError:
                 pass
+    
+    # Add subscriptions table
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS subscriptions (
+            username TEXT PRIMARY KEY,
+            lease_analysis BOOLEAN DEFAULT 0,
+            deal_structuring BOOLEAN DEFAULT 0,
+            offer_generator BOOLEAN DEFAULT 0,
+            FOREIGN KEY(username) REFERENCES users(username)
+        )
+    """)
+    
     # Interactions table
     cursor.execute(
         """
@@ -140,45 +153,63 @@ def login_ui(conn):
 
     # ─── LOGIN TAB ────────────────────────────────────────────────
     with login_tab:
-        username = st.text_input("Username", key="login_username")
-        password = st.text_input("Password", type="password", key="login_password")
-        location_id = st.text_input("Location ID (optional)", key="login_location")
+        username    = st.text_input("Username", key="login_username")
+        password    = st.text_input("Password", type="password", key="login_password")
+        location_id = st.text_input("Login Key (use instead of user/pass)", key="login_location")
 
         if st.button("Log In", key="login_button"):
-            if not username or not password:
+            # 1) Key-only login
+            if location_id and not username and not password:
+                cursor = conn.cursor()
+                cursor.execute(
+                    "SELECT username, role FROM users WHERE location_id = ?",
+                    (location_id,)
+                )
+                row = cursor.fetchone()
+                if row:
+                    st.session_state.logged_in    = True
+                    st.session_state.username     = row[0]
+                    st.session_state.role         = row[1]
+                    st.session_state.location_id  = location_id
+                    # update last_login
+                    cursor.execute("UPDATE users SET last_login = CURRENT_TIMESTAMP WHERE username = ?", (row[0],))
+                    conn.commit()
+                    st.rerun()
+                else:
+                    st.sidebar.error("❌ Invalid login key.")
+
+            # 2) Fallback to username/password
+            elif not username or not password:
                 st.sidebar.error("Enter both username and password")
+
             else:
                 cursor = conn.cursor()
-                cursor.execute("SELECT password, role FROM users WHERE username = ?", (username,))
+                cursor.execute(
+                    "SELECT password, role, location_id FROM users WHERE username = ?",
+                    (username,)
+                )
                 row = cursor.fetchone()
 
                 if row and bcrypt.checkpw(password.encode(), row[0]):
-                    # set session
-                    st.session_state.logged_in = True
-                    st.session_state.username = username
-                    st.session_state.role = row[1]
-                    st.session_state.location_id = location_id or None
-                    # update last_login if column exists
-                    cursor.execute("PRAGMA table_info(users)")
-                    cols = [c[1] for c in cursor.fetchall()]
-                    if "last_login" in cols:
-                        cursor.execute(
-                            "UPDATE users SET last_login = CURRENT_TIMESTAMP WHERE username = ?",
-                            (username,)
-                        )
-                        conn.commit()
+                    st.session_state.logged_in    = True
+                    st.session_state.username     = username
+                    st.session_state.role         = row[1]
+                    st.session_state.location_id  = row[2]
+                    # update last_login
+                    cursor.execute("UPDATE users SET last_login = CURRENT_TIMESTAMP WHERE username = ?", (username,))
+                    conn.commit()
                     st.rerun()
                 else:
                     st.sidebar.error("Invalid username or password")
                     time.sleep(1)
 
+
     # ─── REGISTER TAB ────────────────────────────────────────────
     with register_tab:
-        new_user = st.text_input("New Username", key="reg_username")
-        new_pass = st.text_input("New Password", type="password", key="reg_password")
-        confirm_pass = st.text_input("Confirm Password", type="password", key="reg_confirm")
-        # Default all new registrations to 'user'
-        user_role = "user"
+        new_user    = st.text_input("New Username", key="reg_username")
+        new_pass    = st.text_input("New Password", type="password", key="reg_password")
+        confirm_pass= st.text_input("Confirm Password", type="password", key="reg_confirm")
+        user_role   = "user"
 
         if st.button("Create User", key="reg_button"):
             if not new_user or not new_pass:
@@ -189,14 +220,17 @@ def login_ui(conn):
                 st.error("Password must be at least 8 characters")
             else:
                 try:
+                    # generate unique login key
+                    location_key = str(uuid.uuid4())
                     hashed = bcrypt.hashpw(new_pass.encode(), bcrypt.gensalt())
                     cursor = conn.cursor()
                     cursor.execute(
-                        "INSERT INTO users (username, password, role) VALUES (?, ?, ?)",
-                        (new_user, hashed, user_role)
+                        "INSERT INTO users (username, password, role, location_id) VALUES (?, ?, ?, ?)",
+                        (new_user, hashed, user_role, location_key)
                     )
                     conn.commit()
                     st.success(f"User '{new_user}' created successfully.")
+                    st.info(f"🔑 **Your login key** (save this!): `{location_key}`")
                     time.sleep(1)
                     st.rerun()
                 except sqlite3.IntegrityError:
@@ -355,27 +389,34 @@ def lease_summarization_ui(conn):
     import streamlit as st
     from PyPDF2 import PdfReader
     import json
+    import io
+    import docx
+    from docx.shared import Pt
+    from fpdf import FPDF
 
     st.header("📄 Lease Summary")
+    # Clear previous summary
+    if st.button("Clear Summary", key="clear_lease_summary"):
+        for k in ['last_file', 'last_summary', 'last_mode', 'last_engine']:
+            st.session_state.pop(k, None)
+        st.success("Cleared previous summary.")
+        st.rerun()
+
     st.markdown(
         "Upload your lease PDF and receive a concise summary—choose to process the entire document at once or summarize each page individually."
     )
 
-    # Initialize or clear previous summary when file changes
     uploaded_file = st.file_uploader(
         "Upload Lease Document (PDF)", type=["pdf"], key="lease_file_uploader"
     )
     if 'last_file' in st.session_state and uploaded_file:
         if st.session_state.last_file != uploaded_file.name:
-            st.session_state.pop('last_summary', None)
-            st.session_state.pop('last_mode', None)
-            st.session_state.pop('last_pages', None)
-            st.session_state.pop('last_engine', None)
-    
+            for k in ['last_summary', 'last_mode', 'last_engine']:
+                st.session_state.pop(k, None)
+
     if not uploaded_file:
         return
 
-    # Model selection
     ai_engine = st.radio(
         "Select AI Model",
         ["DeepSeek", "Gemini Pro", "Mistral Large"],
@@ -383,7 +424,6 @@ def lease_summarization_ui(conn):
         horizontal=True,
         key="lease_ai_engine"
     )
-    # Summary mode selection
     summary_mode = st.radio(
         "Summary Mode",
         ["Full Document", "Page-by-Page"],
@@ -394,14 +434,82 @@ def lease_summarization_ui(conn):
 
     # Display existing summary if available
     if 'last_summary' in st.session_state and st.session_state.get('last_file') == uploaded_file.name:
-        st.subheader(f"{st.session_state['last_mode']} Summary ({st.session_state['last_engine']})")
-        if st.session_state['last_mode'] == 'Full Document':
-            st.write(st.session_state['last_summary'])
+        mode = st.session_state['last_mode']
+        engine = st.session_state['last_engine']
+        raw = st.session_state['last_summary']
+        if mode == 'Full Document':
+            summary_content = raw
+            st.subheader(f"Full Document Summary ({engine})")
+            st.write(summary_content)
         else:
-            for idx, part in enumerate(st.session_state['last_summary'], start=1):
-                st.markdown(f"**Page {idx} Summary:**")
+            parts = raw
+            st.subheader(f"Page-by-Page Summary ({engine})")
+            for idx, part in enumerate(parts, start=1):
+                st.markdown(f"**Page {idx}:**")
                 st.write(part)
+            summary_content = "\n\n".join(parts)
         st.divider()
+
+        # Export section styling
+        st.markdown("### 📥 Export Styled Summary")
+        file_base = uploaded_file.name.rsplit(".", 1)[0]
+        file_name = st.text_input("Filename (no extension):", value=file_base, key="lease_export_name")
+
+        # Sanitize and split for PDF
+        safe_content = summary_content.encode('latin-1', 'replace').decode('latin-1')
+        paragraphs_pdf = [p.strip() for p in safe_content.split("\n\n") if p.strip()]
+        # Split original for Word
+        paragraphs_word = [p.strip() for p in summary_content.split("\n\n") if p.strip()]
+
+        # PDF export with header, footer, styling
+        class PDF(FPDF):
+            def header(self):
+                self.set_font('Arial', 'B', 16)
+                self.cell(0, 10, 'Lease Summary', ln=True, align='C')
+                self.set_font('Arial', '', 12)
+                self.cell(0, 8, f"Mode: {mode} | Engine: {engine}", ln=True, align='C')
+                self.ln(5)
+            def footer(self):
+                self.set_y(-15)
+                self.set_font('Arial', 'I', 8)
+                self.cell(0, 10, f"Page {self.page_no()}/{{nb}}", align='C')
+
+        pdf = PDF()
+        pdf.alias_nb_pages()
+        pdf.add_page()
+        pdf.set_font("Arial", '', 12)
+        for para in paragraphs_pdf:
+            pdf.multi_cell(0, 6, para)
+            pdf.ln(2)
+        raw_pdf = pdf.output(dest='S')
+        pdf_bytes = raw_pdf if isinstance(raw_pdf, (bytes, bytearray)) else raw_pdf.encode('latin-1', 'ignore')
+        st.download_button(
+            "Download Styled PDF",
+            data=pdf_bytes,
+            file_name=f"{file_name}.pdf",
+            mime="application/pdf",
+            key="lease_export_pdf"
+        )
+
+        # Word export with heading and styling
+        doc = docx.Document()
+        style = doc.styles['Normal']
+        style.font.name = 'Arial'
+        style.font.size = Pt(12)
+        doc.add_heading('Lease Summary', level=1)
+        doc.add_paragraph(f"Mode: {mode} | Engine: {engine}")
+        doc.add_paragraph("")
+        for para in paragraphs_word:
+            doc.add_paragraph(para)
+        buf = io.BytesIO()
+        doc.save(buf)
+        st.download_button(
+            "Download Styled Word",
+            data=buf.getvalue(),
+            file_name=f"{file_name}.docx",
+            mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            key="lease_export_word"
+        )
 
     # Generate new summary
     if st.button("Generate Summary", key="lease_generate_button"):
@@ -416,91 +524,57 @@ def lease_summarization_ui(conn):
             st.error("No readable text found in the PDF.")
             return
 
-        # Prepare storage
         st.session_state['last_file'] = uploaded_file.name
         st.session_state['last_mode'] = summary_mode
         st.session_state['last_engine'] = ai_engine
 
-        # Full document summary
         if summary_mode == "Full Document":
-            raw_text = "\n".join(pages)
-            chunks = [raw_text[i:i+15000] for i in range(0, len(raw_text), 15000)] if len(raw_text) > 15000 else [raw_text]
-            parts = []
+            text = "\n".join(pages)
             with st.spinner("Summarizing full document..."):
+                summaries = []
+                chunks = [text[i:i+15000] for i in range(0, len(text), 15000)] if len(text) > 15000 else [text]
                 for chunk in chunks:
                     prompt = (
                         "Summarize this portion of the lease agreement in clear, concise language, "
                         "preserving all key details:\n\n" + chunk
                     )
                     if ai_engine == "DeepSeek":
-                        part = call_deepseek(
-                            messages=[{"role":"user","content":prompt}],
-                            model="deepseek-chat",
-                            temperature=0.3,
-                            max_tokens=1024
-                        )
+                        summaries.append(call_deepseek(messages=[{"role":"user","content":prompt}], model="deepseek-chat", temperature=0.3, max_tokens=1024))
                     elif ai_engine == "Gemini Pro":
-                        part = call_gemini(
-                            feature="lease_analysis",
-                            content=prompt,
-                            temperature=0.3
-                        )
+                        summaries.append(call_gemini(feature="lease_analysis", content=prompt, temperature=0.3))
                     else:
-                        part = call_mistral(
-                            messages=[{"role":"user","content":prompt}],
-                            temperature=0.3,
-                            max_tokens=1024
-                        )
-                    parts.append(part)
-                final_output = parts[0] if len(parts) == 1 else "\n\n".join(parts)
+                        summaries.append(call_mistral(messages=[{"role":"user","content":prompt}], temperature=0.3, max_tokens=1024))
+                final = "\n\n".join(summaries)
             st.subheader("Full Document Summary")
-            st.write(final_output)
-            save_interaction(conn, "lease_summary_full", uploaded_file.name, final_output)
-            st.session_state['last_summary'] = final_output
-
-        # Page-by-page summary
+            st.write(final)
+            save_interaction(conn, "lease_summary_full", uploaded_file.name, final)
+            st.session_state['last_summary'] = final
         else:
-            summaries = []
+            parts = []
             st.subheader("Page-by-Page Summaries")
-            for idx, page_text in enumerate(pages, start=1):
-                if not page_text.strip():
-                    summaries.append("(no text detected)")
-                    st.markdown(f"**Page {idx}:** _(no text detected)_")
-                    continue
-                with st.spinner(f"Summarizing page {idx}..."):
-                    prompt = (
-                        f"Summarize page {idx} of this lease agreement in clear, concise language, "
-                        f"covering all information:\n\n{page_text}"
-                    )
-                    if ai_engine == "DeepSeek":
-                        summary = call_deepseek(
-                            messages=[{"role":"user","content":prompt}],
-                            model="deepseek-chat",
-                            temperature=0.3,
-                            max_tokens=512
+            for i, pg in enumerate(pages, start=1):
+                if not pg.strip():
+                    parts.append("(no text detected)")
+                    st.markdown(f"**Page {i}:** _(no text detected)_")
+                else:
+                    with st.spinner(f"Summarizing page {i}..."):
+                        prompt = (
+                            f"Summarize page {i} of this lease agreement in clear, concise language, covering all information:\n\n{pg}"
                         )
-                    elif ai_engine == "Gemini Pro":
-                        summary = call_gemini(
-                            feature="lease_analysis",
-                            content=prompt,
-                            temperature=0.3
-                        )
-                    else:
-                        summary = call_mistral(
-                            messages=[{"role":"user","content":prompt}],
-                            temperature=0.3,
-                            max_tokens=512
-                        )
-                st.markdown(f"**Page {idx} Summary:**")
-                st.write(summary)
-                summaries.append(summary)
-            save_interaction(
-                conn,
-                "lease_summary_pagewise",
-                uploaded_file.name,
-                json.dumps({f"page_{i}": pages[i-1] for i in range(1, len(pages)+1)})
-            )
-            st.session_state['last_summary'] = summaries
+                        if ai_engine == "DeepSeek":
+                            summary = call_deepseek(messages=[{"role":"user","content":prompt}], model="deepseek-chat", temperature=0.3, max_tokens=512)
+                        elif ai_engine == "Gemini Pro":
+                            summary = call_gemini(feature="lease_analysis", content=prompt, temperature=0.3)
+                        else:
+                            summary = call_mistral(messages=[{"role":"user","content":prompt}], temperature=0.3, max_tokens=512)
+                        st.markdown(f"**Page {i} Summary:**")
+                        st.write(summary)
+                        parts.append(summary)
+            save_interaction(conn, "lease_summary_pagewise", uploaded_file.name, json.dumps({f"page_{i}": pages[i-1] for i in range(1, len(pages)+1)}))
+            st.session_state['last_summary'] = parts
+        st.rerun()
+
+
 
 def deal_structuring_ui(conn):
     """Enhanced deal structuring with persistent strategy chat until cleared."""
@@ -1044,20 +1118,17 @@ def offer_generator_ui(conn):
 
 # ─── Admin Portal ──────────────────────────────────────────────────────────────
 def admin_portal_ui(conn):
-    """Enhanced admin portal with usage analytics"""
+    """Enhanced admin portal with usage analytics and subscription management"""
     st.header("🔒 Admin Portal")
 
-    tab1, tab2, tab3 = st.tabs(["User Management", "Content Management", "Usage Analytics"])
+    tab1, tab2, tab3, tab4 = st.tabs(["User Management", "Subscription Management", "Content Management", "Usage Analytics"])
 
     with tab1:
         st.subheader("User Accounts")
-
-        # First check what columns exist in the users table
         cursor = conn.cursor()
         cursor.execute("PRAGMA table_info(users)")
         columns = [column[1] for column in cursor.fetchall()]
 
-        # Build the SELECT query based on available columns
         select_columns = ["username", "role"]
         if "last_login" in columns:
             select_columns.append("last_login")
@@ -1069,7 +1140,6 @@ def admin_portal_ui(conn):
         query = f"SELECT {', '.join(select_columns)} FROM users"
         users = conn.execute(query).fetchall()
 
-        # Format datetime columns for display
         formatted_users = []
         for user in users:
             formatted_user = list(user)
@@ -1081,7 +1151,6 @@ def admin_portal_ui(conn):
                         pass
             formatted_users.append(formatted_user)
 
-        # Create DataFrame with available columns
         user_df = pd.DataFrame(formatted_users, columns=select_columns)
         st.dataframe(user_df)
 
@@ -1099,7 +1168,6 @@ def admin_portal_ui(conn):
                 else:
                     hashed = bcrypt.hashpw(new_pass.encode(), bcrypt.gensalt())
                     try:
-                        # Use the correct columns based on what exists
                         if "location_id" in columns:
                             conn.execute(
                                 "INSERT INTO users (username, password, role, location_id) VALUES (?, ?, ?, ?)",
@@ -1118,9 +1186,47 @@ def admin_portal_ui(conn):
                         st.error("Username already exists")
 
     with tab2:
-        st.subheader("Training Content")
+        st.subheader("Feature Access Control")
+        
+        users = conn.execute("SELECT username FROM users").fetchall()
+        if not users:
+            st.warning("No users found")
+        else:
+            selected_user = st.selectbox("Select User", [u[0] for u in users])
+            
+            sub = conn.execute(
+                "SELECT lease_analysis, deal_structuring, offer_generator FROM subscriptions WHERE username = ?",
+                (selected_user,)
+            ).fetchone()
+            
+            if not sub:
+                conn.execute(
+                    "INSERT INTO subscriptions (username) VALUES (?)",
+                    (selected_user,)
+                )
+                conn.commit()
+                sub = (0, 0, 0)
+                
+            col1, col2, col3 = st.columns(3)
+            with col1:
+                lease_access = st.toggle("Lease Analysis", value=bool(sub[0]))
+            with col2:
+                deal_access = st.toggle("Deal Structuring", value=bool(sub[1]))
+            with col3:
+                offer_access = st.toggle("Offer Generator", value=bool(sub[2]))
+                
+            if st.button("Update Access"):
+                conn.execute(
+                    """UPDATE subscriptions 
+                    SET lease_analysis = ?, deal_structuring = ?, offer_generator = ?
+                    WHERE username = ?""",
+                    (int(lease_access), int(deal_access), int(offer_access), selected_user)
+                )
+                conn.commit()
+                st.success("Access updated successfully!")
 
-        # Document upload
+    with tab3:
+        st.subheader("Training Content")
         with st.expander("Upload Training Materials"):
             file_type = st.selectbox("Content Type", ["Document", "Video"])
             uploaded = st.file_uploader(
@@ -1137,7 +1243,6 @@ def admin_portal_ui(conn):
                 with open(file_path, "wb") as f:
                     f.write(uploaded.getbuffer())
 
-                # Store metadata
                 meta_path = os.path.join(save_dir, f"{uploaded.name}.meta")
                 with open(meta_path, "w") as f:
                     json.dump({
@@ -1149,7 +1254,6 @@ def admin_portal_ui(conn):
 
                 st.success(f"{file_type} uploaded successfully!")
 
-        # Content library
         st.subheader("Content Library")
         if os.path.exists("training_content"):
             files = os.listdir("training_content")
@@ -1170,10 +1274,8 @@ def admin_portal_ui(conn):
                     )
                     st.divider()
 
-    with tab3:
+    with tab4:
         st.subheader("Usage Analytics")
-
-        # Feature usage
         st.write("### Feature Usage")
         usage = conn.execute(
             "SELECT feature, COUNT(*) as count FROM interactions GROUP BY feature"
@@ -1188,7 +1290,6 @@ def admin_portal_ui(conn):
         else:
             st.warning("No usage data available yet")
 
-        # User activity
         st.write("### User Activity")
         activity = conn.execute(
             "SELECT username, COUNT(*) as interactions "
@@ -1589,7 +1690,12 @@ def main():
         st.session_state.update({
             "logged_in": False,
             "username": None,
-            "role": None
+            "role": None,
+            "subscription": {
+                "lease_analysis": False,
+                "deal_structuring": False,
+                "offer_generator": False
+            }
         })
 
     # Authentication flow
@@ -1597,12 +1703,49 @@ def main():
         login_ui(conn)
         return
 
-    # Sidebar navigation
+    # After login check, get user's subscription status
+    if st.session_state.logged_in:
+        sub = conn.execute(
+            "SELECT lease_analysis, deal_structuring, offer_generator FROM subscriptions WHERE username = ?",
+            (st.session_state.username,)
+        ).fetchone()
+        
+        # Default to no access if no record exists (except for admin)
+        if not sub and st.session_state.role != "admin":
+            conn.execute(
+                "INSERT INTO subscriptions (username) VALUES (?)",
+                (st.session_state.username,)
+            )
+            conn.commit()
+            sub = (0, 0, 0)
+        elif st.session_state.role == "admin":
+            # Admin has access to everything
+            sub = (1, 1, 1)
+            
+        st.session_state.subscription = {
+            "lease_analysis": bool(sub[0]),
+            "deal_structuring": bool(sub[1]),
+            "offer_generator": bool(sub[2])
+        }
+
+    # Sidebar navigation - only show accessible features
     st.sidebar.title(f"Welcome, {st.session_state.username}")
     st.sidebar.markdown(f"**Location ID:** {st.session_state.get('location_id', 'Not specified')}")
-    features = ["Lease Summarization", "Deal Structuring", "Offer Generator", "History"]
+    
+    features = []
+    
+    if st.session_state.subscription.get("lease_analysis") or st.session_state.role == "admin":
+        features.append("Lease Summarization")
+    if st.session_state.subscription.get("deal_structuring") or st.session_state.role == "admin":
+        features.append("Deal Structuring")
+    if st.session_state.subscription.get("offer_generator") or st.session_state.role == "admin":
+        features.append("Offer Generator")
+        
+    features.append("History")  # History is always available
+    
     if st.session_state.role == "admin":
         features.insert(-1, "Admin Portal")
+        
     selected = st.sidebar.radio("Navigation", features)
 
     # Main content
