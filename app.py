@@ -487,6 +487,8 @@ def save_interaction(conn, feature: str, input_text: str, output_text: str):
         conn.commit()
 
 
+# Helper to strip Markdown tokens
+
 def strip_markdown(text: str) -> str:
     # remove bold/italic markers
     text = re.sub(r"\*\*(.*?)\*\*", r"\1", text)
@@ -530,7 +532,7 @@ def lease_summarization_ui(conn):
     # Model & mode selection
     ai_engine = st.radio(
         "Select AI Model",
-        ["In depth summarisation", "General Summary", "General Summary Pro"],
+        ["DeepSeek", "Gemini Pro", "Mistral Large"],
         index=0,
         horizontal=True,
         key="lease_ai_engine"
@@ -568,8 +570,14 @@ def lease_summarization_ui(conn):
         file_base = uploaded_file.name.rsplit(".", 1)[0]
         file_name = st.text_input("Filename (no extension):", value=file_base, key="lease_export_name")
 
-        # Clean paragraphs
-        paragraphs_pdf = [strip_markdown(p) for p in summary_content.split("\n\n") if p.strip()]
+        # Clean and ensure Latin-1 encoding for PDF
+        paragraphs_pdf = [
+            strip_markdown(p)
+            .encode('latin-1', 'replace')
+            .decode('latin-1')
+            for p in summary_content.split("\n\n") if p.strip()
+        ]
+        # Clean for Word (supports full Unicode)
         paragraphs_word = [strip_markdown(p) for p in summary_content.split("\n\n") if p.strip()]
 
         # PDF generation
@@ -621,7 +629,7 @@ def lease_summarization_ui(conn):
             for idx, para in enumerate(paragraphs_pdf, start=1):
                 pdf.add_section(f'Page {idx} Summary', [para], page_number=idx)
 
-        pdf_bytes = pdf.output(dest='S').encode('latin-1')
+        pdf_bytes = pdf.output(dest='S').encode('latin-1', 'replace')
         st.download_button(
             "Download Styled PDF",
             data=pdf_bytes,
@@ -650,6 +658,7 @@ def lease_summarization_ui(conn):
             key="lease_export_word"
         )
 
+    # Generate summaries when button clicked
     if st.button("Generate Summary", key="lease_generate_button"):
         try:
             reader = PdfReader(uploaded_file)
@@ -676,12 +685,7 @@ def lease_summarization_ui(conn):
                         "Summarize this portion of the lease agreement in clear, concise language, "
                         "preserving all key details:\n\n" + chunk
                     )
-                    if ai_engine == "In depth summarisation":
-                        summaries.append(call_deepseek(messages=[{"role":"user","content":prompt}], model="deepseek-chat", temperature=0.3, max_tokens=1024))
-                    elif ai_engine == "General Summary":
-                        summaries.append(call_gemini(feature="lease_analysis", content=prompt, temperature=0.3))
-                    else:
-                        summaries.append(call_mistral(messages=[{"role":"user","content":prompt}], temperature=0.3, max_tokens=1024))
+                    summaries.append(call_deepseek(messages=[{"role":"user","content":prompt}], model="deepseek-chat", temperature=0.3, max_tokens=1024))
                 final = "\n\n".join(summaries)
             st.subheader("Full Document Summary")
             st.write(final)
@@ -699,18 +703,14 @@ def lease_summarization_ui(conn):
                         prompt = (
                             f"Summarize page {i} of this lease agreement in clear, concise language, covering all information:\n\n{pg}"
                         )
-                        if ai_engine == "In depth summarisation":
-                            summary = call_deepseek(messages=[{"role":"user","content":prompt}], model="deepseek-chat", temperature=0.3, max_tokens=512)
-                        elif ai_engine == "General Summary":
-                            summary = call_gemini(feature="lease_analysis", content=prompt, temperature=0.3)
-                        else:
-                            summary = call_mistral(messages=[{"role":"user","content":prompt}], temperature=0.3, max_tokens=512)
+                        summary = call_deepseek(messages=[{"role":"user","content":prompt}], model="deepseek-chat", temperature=0.3, max_tokens=512)
                         st.markdown(f"**Page {i} Summary:**")
                         st.write(summary)
                         parts.append(summary)
             save_interaction(conn, "lease_summary_pagewise", uploaded_file.name, json.dumps({f"page_{i}": pages[i-1] for i in range(1, len(pages)+1)}))
             st.session_state['last_summary'] = parts
         st.rerun()
+
 
 def deal_structuring_ui(conn):
     """Enhanced deal structuring with persistent strategy chat until cleared."""
