@@ -1,3 +1,4 @@
+%%writefile app.py
 import io
 import json
 import os
@@ -663,10 +664,10 @@ def lease_summarization_ui(conn):
             return
 
         st.session_state['last_file'] = uploaded_file.name
-        st.session_state['last_model'] = summary_mode
+        st.session_state['last_mode'] = summary_mode
         st.session_state['last_engine'] = ai_engine
 
-        if summary_model == "Full Document":
+        if summary_mode == "Full Document":
             text = "\n".join(pages)
             with st.spinner("Summarizing full document..."):
                 summaries = []
