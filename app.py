@@ -532,7 +532,7 @@ def lease_summarization_ui(conn):
     # Model & mode selection
     ai_engine = st.radio(
         "Select AI Model",
-        ["DeepSeek", "Gemini Pro", "Mistral Large"],
+        ["In depth summarisation", "General Summary", "General Summary Pro"],
         index=0,
         horizontal=True,
         key="lease_ai_engine"
