@@ -1,3 +1,4 @@
+%%writefile app.py
 import io
 import json
 import os
@@ -1500,177 +1501,177 @@ def chatbot_ui(conn):
         save_interaction(conn, "chatbot", user_input, answer)
 
 
-def ocr_pdf_to_searchable(input_pdf_bytes, ocr_model=None):
-    """
-    Convert a non-selectable PDF (scanned document) into a searchable PDF using OCR.
-    """
-    try:
-        images = convert_from_bytes(input_pdf_bytes)
-        pdf = FPDF()
-        pdf.set_auto_page_break(auto=True, margin=15)
+# def ocr_pdf_to_searchable(input_pdf_bytes, ocr_model=None):
+#     """
+#     Convert a non-selectable PDF (scanned document) into a searchable PDF using OCR.
+#     """
+#     try:
+#         images = convert_from_bytes(input_pdf_bytes)
+#         pdf = FPDF()
+#         pdf.set_auto_page_break(auto=True, margin=15)
 
-        for img in images:
-            if ocr_model:
-                text = predict_text_with_model(img, ocr_model)
-            else:
-                text = pytesseract.image_to_string(img)
+#         for img in images:
+#             if ocr_model:
+#                 text = predict_text_with_model(img, ocr_model)
+#             else:
+#                 text = pytesseract.image_to_string(img)
 
-            pdf.add_page()
-            img_path = "temp_img.jpg"
-            img.save(img_path)
-            pdf.image(img_path, x=10, y=8, w=190)
-            pdf.set_font("Arial", size=10)
-            pdf.set_text_color(0, 0, 0, 0)
-            pdf.multi_cell(0, 5, text)
-            os.remove(img_path)
+#             pdf.add_page()
+#             img_path = "temp_img.jpg"
+#             img.save(img_path)
+#             pdf.image(img_path, x=10, y=8, w=190)
+#             pdf.set_font("Arial", size=10)
+#             pdf.set_text_color(0, 0, 0, 0)
+#             pdf.multi_cell(0, 5, text)
+#             os.remove(img_path)
 
-        return pdf.output(dest='S').encode('latin-1')
+#         return pdf.output(dest='S').encode('latin-1')
 
-    except Exception as e:
-        st.error(f"OCR PDF conversion failed: {str(e)}")
-        return None
+#     except Exception as e:
+#         st.error(f"OCR PDF conversion failed: {str(e)}")
+#         return None
 
 
-def ocr_pdf_ui(conn):
-    """Convert non-selectable PDFs to searchable PDFs using OCR"""
-    st.header("🔍 OCR PDF Converter")
-    st.markdown("Convert scanned/non-selectable PDFs into searchable PDF documents with text layers.")
+# def ocr_pdf_ui(conn):
+#     """Convert non-selectable PDFs to searchable PDFs using OCR"""
+#     st.header("🔍 OCR PDF Converter")
+#     st.markdown("Convert scanned/non-selectable PDFs into searchable PDF documents with text layers.")
 
-    with st.expander("⚙️ OCR Configuration", expanded=True):
-        col1, col2 = st.columns(2)
-        with col1:
-            ocr_engine = st.radio("OCR Engine", ["Tesseract", "AI Model"], index=0)
-            dpi = st.slider("Scan Resolution (DPI)", 150, 600, 300)
-        with col2:
-            preserve_layout = st.checkbox("Preserve Original Layout", True)
-            language = st.selectbox(
-                "Document Language",
-                ["eng", "fra", "deu", "spa", "por", "chi_sim", "jpn", "kor"]
-            )
-            force_ocr = st.checkbox("Force OCR Processing", False)
+#     with st.expander("⚙️ OCR Configuration", expanded=True):
+#         col1, col2 = st.columns(2)
+#         with col1:
+#             ocr_engine = st.radio("OCR Engine", ["Tesseract", "AI Model"], index=0)
+#             dpi = st.slider("Scan Resolution (DPI)", 150, 600, 300)
+#         with col2:
+#             preserve_layout = st.checkbox("Preserve Original Layout", True)
+#             language = st.selectbox(
+#                 "Document Language",
+#                 ["eng", "fra", "deu", "spa", "por", "chi_sim", "jpn", "kor"]
+#             )
+#             force_ocr = st.checkbox("Force OCR Processing", False)
 
-    uploaded_file = st.file_uploader("Upload PDF File", type=["pdf"])
-    if not uploaded_file:
-        return
+#     uploaded_file = st.file_uploader("Upload PDF File", type=["pdf"])
+#     if not uploaded_file:
+#         return
 
-    ocr_model = None
-    if ocr_engine == "AI Model":
-        with st.spinner("Loading AI OCR model..."):
-            try:
-                ocr_model = load_ocr_model()
-                if ocr_model is None:
-                    raise ValueError("Model load returned None")
-            except Exception as e:
-                st.error(f"Failed to load AI OCR model: {e}")
-                st.info("Falling back to Tesseract engine.")
-                ocr_engine = "Tesseract"
+#     ocr_model = None
+#     if ocr_engine == "AI Model":
+#         with st.spinner("Loading AI OCR model..."):
+#             try:
+#                 ocr_model = load_ocr_model()
+#                 if ocr_model is None:
+#                     raise ValueError("Model load returned None")
+#             except Exception as e:
+#                 st.error(f"Failed to load AI OCR model: {e}")
+#                 st.info("Falling back to Tesseract engine.")
+#                 ocr_engine = "Tesseract"
 
-    if st.button("Convert to Searchable PDF"):
-        file_bytes = uploaded_file.read()
-        if not file_bytes.startswith(b"%PDF"):
-            st.error("ⓘ That doesn’t look like a valid PDF.")
-            return
+#     if st.button("Convert to Searchable PDF"):
+#         file_bytes = uploaded_file.read()
+#         if not file_bytes.startswith(b"%PDF"):
+#             st.error("ⓘ That doesn’t look like a valid PDF.")
+#             return
 
-        status = st.empty()
-        if not force_ocr:
-            try:
-                reader = PdfReader(io.BytesIO(file_bytes))
-                sample_text = "".join(
-                    page.extract_text() or "" for page in reader.pages[:2]
-                )
-                if len(sample_text) > 1000 or (sample_text.count(" ")/len(sample_text) > 0.15):
-                    st.warning(
-                        "This PDF appears to have selectable text. Use ‘Force OCR’ to override."
-                    )
-                    with st.expander("Extracted Text Sample"):
-                        st.code(sample_text[:1000] + "…")
-                    return
-            except Exception:
-                pass
+#         status = st.empty()
+#         if not force_ocr:
+#             try:
+#                 reader = PdfReader(io.BytesIO(file_bytes))
+#                 sample_text = "".join(
+#                     page.extract_text() or "" for page in reader.pages[:2]
+#                 )
+#                 if len(sample_text) > 1000 or (sample_text.count(" ")/len(sample_text) > 0.15):
+#                     st.warning(
+#                         "This PDF appears to have selectable text. Use ‘Force OCR’ to override."
+#                     )
+#                     with st.expander("Extracted Text Sample"):
+#                         st.code(sample_text[:1000] + "…")
+#                     return
+#             except Exception:
+#                 pass
 
-        texts = []
-        image_paths = []
-        success_pages = 0
+#         texts = []
+#         image_paths = []
+#         success_pages = 0
 
-        try:
-            with st.spinner("Converting PDF → images…"):
-                images = convert_from_bytes(
-                    file_bytes,
-                    dpi=dpi,
-                    fmt="jpeg",
-                    thread_count=4,
-                    strict=False
-                )
-                if not images:
-                    raise RuntimeError("No pages found in PDF")
+#         try:
+#             with st.spinner("Converting PDF → images…"):
+#                 images = convert_from_bytes(
+#                     file_bytes,
+#                     dpi=dpi,
+#                     fmt="jpeg",
+#                     thread_count=4,
+#                     strict=False
+#                 )
+#                 if not images:
+#                     raise RuntimeError("No pages found in PDF")
 
-            for idx, img in enumerate(images):
-                status.text(f"🔠 OCR page {idx+1}/{len(images)}…")
-                img_path = f"temp_page_{idx}.jpg"
-                img.save(img_path, "JPEG", quality=80)
-                image_paths.append(img_path)
+#             for idx, img in enumerate(images):
+#                 status.text(f"🔠 OCR page {idx+1}/{len(images)}…")
+#                 img_path = f"temp_page_{idx}.jpg"
+#                 img.save(img_path, "JPEG", quality=80)
+#                 image_paths.append(img_path)
 
-                if ocr_engine == "Tesseract":
-                    page_text = pytesseract.image_to_string(
-                        Image.open(img_path),
-                        lang=language,
-                        config="--oem 3 --psm 6"
-                    )
-                else:
-                    page_text = predict_text_with_model(img, ocr_model) or ""
+#                 if ocr_engine == "Tesseract":
+#                     page_text = pytesseract.image_to_string(
+#                         Image.open(img_path),
+#                         lang=language,
+#                         config="--oem 3 --psm 6"
+#                     )
+#                 else:
+#                     page_text = predict_text_with_model(img, ocr_model) or ""
 
-                texts.append(page_text)
-                success_pages += 1
+#                 texts.append(page_text)
+#                 success_pages += 1
 
-            pdf = FPDF()
-            pdf.set_auto_page_break(True, 15)
-            pdf.set_creator("PropertyDealsAI OCR Converter")
+#             pdf = FPDF()
+#             pdf.set_auto_page_break(True, 15)
+#             pdf.set_creator("PropertyDealsAI OCR Converter")
 
-            for img_path, page_text in zip(image_paths, texts):
-                safe_text = page_text.encode('latin-1', 'ignore').decode('latin-1')
-                pdf.add_page()
-                if preserve_layout:
-                    pdf.image(img_path, x=10, y=8, w=190)
-                pdf.set_font("Arial", size=10)
-                pdf.set_text_color(0, 0, 0)
-                pdf.multi_cell(0, 5, safe_text)
+#             for img_path, page_text in zip(image_paths, texts):
+#                 safe_text = page_text.encode('latin-1', 'ignore').decode('latin-1')
+#                 pdf.add_page()
+#                 if preserve_layout:
+#                     pdf.image(img_path, x=10, y=8, w=190)
+#                 pdf.set_font("Arial", size=10)
+#                 pdf.set_text_color(0, 0, 0)
+#                 pdf.multi_cell(0, 5, safe_text)
 
-            pdf_bytes = pdf.output(dest='S').encode('latin-1', 'ignore')
+#             pdf_bytes = pdf.output(dest='S').encode('latin-1', 'ignore')
 
-        except Exception as e:
-            st.error(f"Conversion failed: {e}")
-            return
+#         except Exception as e:
+#             st.error(f"Conversion failed: {e}")
+#             return
 
-        finally:
-            status.empty()
-            for path in image_paths:
-                try:
-                    os.remove(path)
-                except OSError:
-                    pass
+#         finally:
+#             status.empty()
+#             for path in image_paths:
+#                 try:
+#                     os.remove(path)
+#                 except OSError:
+#                     pass
 
-        st.success(f"✅ Converted {success_pages}/{len(texts)} pages.")
-        with st.expander("📝 OCR Results Preview", expanded=True):
-            tab1, tab2 = st.tabs(["Extracted Text", "First-Page Preview"])
-            with tab1:
-                preview = "\n\n------\n\n".join(texts)
-                st.text(preview[:2000] + ("…" if len(preview) > 2000 else ""))
-            with tab2:
-                st.image(Image.open(image_paths[0]), use_column_width=True)
+#         st.success(f"✅ Converted {success_pages}/{len(texts)} pages.")
+#         with st.expander("📝 OCR Results Preview", expanded=True):
+#             tab1, tab2 = st.tabs(["Extracted Text", "First-Page Preview"])
+#             with tab1:
+#                 preview = "\n\n------\n\n".join(texts)
+#                 st.text(preview[:2000] + ("…" if len(preview) > 2000 else ""))
+#             with tab2:
+#                 st.image(Image.open(image_paths[0]), use_column_width=True)
 
-        st.download_button(
-            "💾 Download Searchable PDF",
-            data=pdf_bytes,
-            file_name=f"searchable_{uploaded_file.name}",
-            mime="application/pdf"
-        )
+#         st.download_button(
+#             "💾 Download Searchable PDF",
+#             data=pdf_bytes,
+#             file_name=f"searchable_{uploaded_file.name}",
+#             mime="application/pdf"
+#         )
 
-        save_interaction(
-            conn,
-            "ocr_pdf",
-            f"{uploaded_file.name} → searchable PDF",
-            f"Engine={ocr_engine}, DPI={dpi}, Lang={language}"
-        )
+#         save_interaction(
+#             conn,
+#             "ocr_pdf",
+#             f"{uploaded_file.name} → searchable PDF",
+#             f"Engine={ocr_engine}, DPI={dpi}, Lang={language}"
+#         )
 
 
 def main():
@@ -1773,7 +1774,7 @@ def main():
         features.append("History")
         if st.session_state.role == "admin":
             features.append("Admin Portal")
-        features.append("OCR PDF")
+        # features.append("OCR PDF")
 
     selected = st.sidebar.radio("Navigation", features if features else ["Login"])
 
@@ -1787,8 +1788,8 @@ def main():
                 offer_generator_ui(conn)
             elif selected == "History":
                 history_ui(conn)
-            elif selected == "OCR PDF":
-                ocr_pdf_ui(conn)
+            # elif selected == "OCR PDF":
+            #     ocr_pdf_ui(conn)
             elif selected == "Admin Portal" and st.session_state.role == "admin":
                 admin_portal_ui(conn)
             else:
