@@ -636,7 +636,7 @@ def lease_summarization_ui(conn):
         style.font.name = 'Arial'
         style.font.size = Pt(12)
         doc.add_heading('Lease Summary', level=1)
-        doc.add_paragraph(f"Model: {mode} | Engine: {engine}")
+        doc.add_paragraph(f"Mode: {mode} | Engine: {engine}")
         doc.add_paragraph("")
         for para in paragraphs_word:
             doc.add_paragraph(para)
