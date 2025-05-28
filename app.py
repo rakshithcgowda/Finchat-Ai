@@ -1,3 +1,4 @@
+%%writefile app.py
 import io
 import json
 import os
@@ -515,21 +516,16 @@ def lease_summarization_ui(conn):
         "Upload your lease PDF and receive a concise summary—choose to process the entire document at once or summarize each page individually."
     )
 
-    # File uploader
     uploaded_file = st.file_uploader(
         "Upload Lease Document (PDF)", type=["pdf"], key="lease_file_uploader"
     )
-
-    # Reset cache if new file
     if 'last_file' in st.session_state and uploaded_file:
         if st.session_state.last_file != uploaded_file.name:
             for k in ['last_summary', 'last_mode', 'last_engine']:
                 st.session_state.pop(k, None)
-
     if not uploaded_file:
         return
 
-    # Model & mode selection
     ai_engine = st.radio(
         "Select AI Model",
         ["In depth summarisation", "General Summary", "General Summary Pro"],
@@ -545,8 +541,7 @@ def lease_summarization_ui(conn):
         key="lease_summary_mode"
     )
 
-    # If already summarized, show & export
-    if 'last_summary' in st.session_state and st.session_state.get('last_file') == uploaded_file.name:
+    if 'last_summary' in st.session_state and st.session_state['last_file'] == uploaded_file.name:
         mode = st.session_state['last_mode']
         engine = st.session_state['last_engine']
         raw = st.session_state['last_summary']
@@ -559,8 +554,7 @@ def lease_summarization_ui(conn):
         else:
             parts = raw
             st.subheader(f"Page-by-Page Summary ({engine})")
-            for idx, part in enumerate(parts, start=1):
-                st.markdown(f"**Page {idx}:**")
+            for part in parts:
                 st.write(part)
             summary_content = "\n\n".join(parts)
 
@@ -577,10 +571,8 @@ def lease_summarization_ui(conn):
             .decode('latin-1')
             for p in summary_content.split("\n\n") if p.strip()
         ]
-        # Clean for Word (supports full Unicode)
         paragraphs_word = [strip_markdown(p) for p in summary_content.split("\n\n") if p.strip()]
 
-        # PDF generation
         class PDF(FPDF):
             def header(self):
                 self.set_font('Helvetica', 'B', 16)
@@ -601,19 +593,18 @@ def lease_summarization_ui(conn):
                 self.cell(0, 10, f'Property Deals AI | Page {self.page_no()}/{{nb}}', align='C')
 
             def add_section(self, title, content, page_number=None):
-                self.set_font('Helvetica', 'B', 12)
-                self.set_text_color(44, 134, 171)
-                section_title = f'Page {page_number}' if page_number else title
-                self.cell(0, 8, section_title, ln=True)
+                if title:
+                    self.set_font('Helvetica', 'B', 12)
+                    self.set_text_color(44, 134, 171)
+                    self.cell(0, 8, title, ln=True)
                 self.set_font('Helvetica', '', 11)
                 self.set_text_color(0, 0, 0)
                 if isinstance(content, list):
                     for item in content:
-                        self.cell(5)
-                        self.cell(5, 6, '-', align='C')
-                        self.multi_cell(180, 6, item)
+                        self.multi_cell(0, 6, item)
+                        self.ln(1)
                 else:
-                    self.multi_cell(190, 6, content)
+                    self.multi_cell(0, 6, content)
                 self.ln(4)
 
         pdf = PDF()
@@ -626,8 +617,8 @@ def lease_summarization_ui(conn):
         if mode == 'Full Document':
             pdf.add_section('Full Document Summary', paragraphs_pdf)
         else:
-            for idx, para in enumerate(paragraphs_pdf, start=1):
-                pdf.add_section(f'Page {idx} Summary', [para], page_number=idx)
+            for para in paragraphs_pdf:
+                pdf.add_section('', [para])
 
         pdf_bytes = pdf.output(dest='S').encode('latin-1', 'replace')
         st.download_button(
@@ -658,7 +649,6 @@ def lease_summarization_ui(conn):
             key="lease_export_word"
         )
 
-    # Generate summaries when button clicked
     if st.button("Generate Summary", key="lease_generate_button"):
         try:
             reader = PdfReader(uploaded_file)
@@ -697,15 +687,12 @@ def lease_summarization_ui(conn):
             for i, pg in enumerate(pages, start=1):
                 if not pg.strip():
                     parts.append("(no text detected)")
-                    st.markdown(f"**Page {i}:** _(no text detected)_")
                 else:
                     with st.spinner(f"Summarizing page {i}..."):
                         prompt = (
                             f"Summarize page {i} of this lease agreement in clear, concise language, covering all information:\n\n{pg}"
                         )
                         summary = call_deepseek(messages=[{"role":"user","content":prompt}], model="deepseek-chat", temperature=0.3, max_tokens=512)
-                        st.markdown(f"**Page {i} Summary:**")
-                        st.write(summary)
                         parts.append(summary)
             save_interaction(conn, "lease_summary_pagewise", uploaded_file.name, json.dumps({f"page_{i}": pages[i-1] for i in range(1, len(pages)+1)}))
             st.session_state['last_summary'] = parts
