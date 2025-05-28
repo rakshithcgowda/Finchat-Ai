@@ -25,6 +25,7 @@ import torch
 from torchvision import transforms
 import uuid
 import streamlit.components.v1 as components
+from docx.shared import Pt
 
 # ─── Configuration ──────────────────────────────────────────────────────────────
 GOOGLE_API_KEY = os.environ.get(
@@ -486,11 +487,24 @@ def save_interaction(conn, feature: str, input_text: str, output_text: str):
         conn.commit()
 
 
+def strip_markdown(text: str) -> str:
+    # remove bold/italic markers
+    text = re.sub(r"\*\*(.*?)\*\*", r"\1", text)
+    text = re.sub(r"\*(.*?)\*",   r"\1", text)
+    # remove ATX headings
+    text = re.sub(r"^\s*#{1,6}\s*", '', text, flags=re.MULTILINE)
+    # remove list bullets
+    text = re.sub(r"^\s*[-*+]\s*",   '', text, flags=re.MULTILINE)
+    return text.strip()
+
+
 def lease_summarization_ui(conn):
     """Lease Summarization: upload PDF and get either full-document or page-by-page summaries with model selection, persisting results for chatbot usage."""
     st.header("📄 Lease Summary")
+
+    # Clear previous summary state
     if st.button("Clear Summary", key="clear_lease_summary"):
-        for k in ['last_file', 'last_summary', 'last_mode', 'last_engine']:
+        for k in ["last_file", "last_summary", "last_mode", "last_engine"]:
             st.session_state.pop(k, None)
         st.success("Cleared previous summary.")
         st.rerun()
@@ -499,9 +513,12 @@ def lease_summarization_ui(conn):
         "Upload your lease PDF and receive a concise summary—choose to process the entire document at once or summarize each page individually."
     )
 
+    # File uploader
     uploaded_file = st.file_uploader(
         "Upload Lease Document (PDF)", type=["pdf"], key="lease_file_uploader"
     )
+
+    # Reset cache if new file
     if 'last_file' in st.session_state and uploaded_file:
         if st.session_state.last_file != uploaded_file.name:
             for k in ['last_summary', 'last_mode', 'last_engine']:
@@ -510,9 +527,10 @@ def lease_summarization_ui(conn):
     if not uploaded_file:
         return
 
+    # Model & mode selection
     ai_engine = st.radio(
         "Select AI Model",
-        ["DeepSeek", "Gemini Pro", "Mistral Large"],
+        ["In depth summarisation", "General Summary", "General Summary Pro"],
         index=0,
         horizontal=True,
         key="lease_ai_engine"
@@ -525,10 +543,13 @@ def lease_summarization_ui(conn):
         key="lease_summary_mode"
     )
 
+    # If already summarized, show & export
     if 'last_summary' in st.session_state and st.session_state.get('last_file') == uploaded_file.name:
         mode = st.session_state['last_mode']
         engine = st.session_state['last_engine']
         raw = st.session_state['last_summary']
+
+        # Display summary
         if mode == 'Full Document':
             summary_content = raw
             st.subheader(f"Full Document Summary ({engine})")
@@ -540,37 +561,67 @@ def lease_summarization_ui(conn):
                 st.markdown(f"**Page {idx}:**")
                 st.write(part)
             summary_content = "\n\n".join(parts)
-        st.divider()
 
+        st.divider()
         st.markdown("### 📥 Export Styled Summary")
+
         file_base = uploaded_file.name.rsplit(".", 1)[0]
         file_name = st.text_input("Filename (no extension):", value=file_base, key="lease_export_name")
 
-        safe_content = summary_content.encode('latin-1', 'replace').decode('latin-1')
-        paragraphs_pdf = [p.strip() for p in safe_content.split("\n\n") if p.strip()]
-        paragraphs_word = [p.strip() for p in summary_content.split("\n\n") if p.strip()]
+        # Clean paragraphs
+        paragraphs_pdf = [strip_markdown(p) for p in summary_content.split("\n\n") if p.strip()]
+        paragraphs_word = [strip_markdown(p) for p in summary_content.split("\n\n") if p.strip()]
 
+        # PDF generation
         class PDF(FPDF):
             def header(self):
-                self.set_font('Arial', 'B', 16)
-                self.cell(0, 10, 'Lease Summary', ln=True, align='C')
-                self.set_font('Arial', '', 12)
-                self.cell(0, 8, f"Mode: {mode} | Engine: {engine}", ln=True, align='C')
+                self.set_font('Helvetica', 'B', 16)
+                self.set_text_color(44, 134, 171)
+                self.cell(0, 10, 'Lease Summary Report', ln=True, align='C')
+                self.set_font('Helvetica', 'I', 10)
+                self.set_text_color(85, 85, 85)
+                self.cell(0, 6, f'Mode: {mode} | Engine: {engine} | Generated: {datetime.now():%B %d, %Y}', ln=True, align='C')
+                self.ln(8)
+                self.set_draw_color(200, 200, 200)
+                self.line(10, self.get_y(), 200, self.get_y())
                 self.ln(5)
+
             def footer(self):
                 self.set_y(-15)
-                self.set_font('Arial', 'I', 8)
-                self.cell(0, 10, f"Page {self.page_no()}/{{nb}}", align='C')
+                self.set_font('Helvetica', 'I', 8)
+                self.set_text_color(85, 85, 85)
+                self.cell(0, 10, f'Property Deals AI | Page {self.page_no()}/{{nb}}', align='C')
+
+            def add_section(self, title, content, page_number=None):
+                self.set_font('Helvetica', 'B', 12)
+                self.set_text_color(44, 134, 171)
+                section_title = f'Page {page_number}' if page_number else title
+                self.cell(0, 8, section_title, ln=True)
+                self.set_font('Helvetica', '', 11)
+                self.set_text_color(0, 0, 0)
+                if isinstance(content, list):
+                    for item in content:
+                        self.cell(5)
+                        self.cell(5, 6, '-', align='C')
+                        self.multi_cell(180, 6, item)
+                else:
+                    self.multi_cell(190, 6, content)
+                self.ln(4)
 
         pdf = PDF()
         pdf.alias_nb_pages()
+        pdf.set_left_margin(15)
+        pdf.set_right_margin(15)
+        pdf.set_auto_page_break(auto=True, margin=15)
         pdf.add_page()
-        pdf.set_font("Arial", '', 12)
-        for para in paragraphs_pdf:
-            pdf.multi_cell(0, 6, para)
-            pdf.ln(2)
-        raw_pdf = pdf.output(dest='S')
-        pdf_bytes = raw_pdf if isinstance(raw_pdf, (bytes, bytearray)) else raw_pdf.encode('latin-1', 'ignore')
+
+        if mode == 'Full Document':
+            pdf.add_section('Full Document Summary', paragraphs_pdf)
+        else:
+            for idx, para in enumerate(paragraphs_pdf, start=1):
+                pdf.add_section(f'Page {idx} Summary', [para], page_number=idx)
+
+        pdf_bytes = pdf.output(dest='S').encode('latin-1')
         st.download_button(
             "Download Styled PDF",
             data=pdf_bytes,
@@ -579,12 +630,13 @@ def lease_summarization_ui(conn):
             key="lease_export_pdf"
         )
 
+        # Word export
         doc = docx.Document()
         style = doc.styles['Normal']
         style.font.name = 'Arial'
         style.font.size = Pt(12)
         doc.add_heading('Lease Summary', level=1)
-        doc.add_paragraph(f"Mode: {mode} | Engine: {engine}")
+        doc.add_paragraph(f"Model: {mode} | Engine: {engine}")
         doc.add_paragraph("")
         for para in paragraphs_word:
             doc.add_paragraph(para)
@@ -611,10 +663,10 @@ def lease_summarization_ui(conn):
             return
 
         st.session_state['last_file'] = uploaded_file.name
-        st.session_state['last_mode'] = summary_mode
+        st.session_state['last_model'] = summary_mode
         st.session_state['last_engine'] = ai_engine
 
-        if summary_mode == "Full Document":
+        if summary_model == "Full Document":
             text = "\n".join(pages)
             with st.spinner("Summarizing full document..."):
                 summaries = []
@@ -624,9 +676,9 @@ def lease_summarization_ui(conn):
                         "Summarize this portion of the lease agreement in clear, concise language, "
                         "preserving all key details:\n\n" + chunk
                     )
-                    if ai_engine == "DeepSeek":
+                    if ai_engine == "In depth summarisation":
                         summaries.append(call_deepseek(messages=[{"role":"user","content":prompt}], model="deepseek-chat", temperature=0.3, max_tokens=1024))
-                    elif ai_engine == "Gemini Pro":
+                    elif ai_engine == "General Summary":
                         summaries.append(call_gemini(feature="lease_analysis", content=prompt, temperature=0.3))
                     else:
                         summaries.append(call_mistral(messages=[{"role":"user","content":prompt}], temperature=0.3, max_tokens=1024))
@@ -647,9 +699,9 @@ def lease_summarization_ui(conn):
                         prompt = (
                             f"Summarize page {i} of this lease agreement in clear, concise language, covering all information:\n\n{pg}"
                         )
-                        if ai_engine == "DeepSeek":
+                        if ai_engine == "In depth summarisation":
                             summary = call_deepseek(messages=[{"role":"user","content":prompt}], model="deepseek-chat", temperature=0.3, max_tokens=512)
-                        elif ai_engine == "Gemini Pro":
+                        elif ai_engine == "General Summary":
                             summary = call_gemini(feature="lease_analysis", content=prompt, temperature=0.3)
                         else:
                             summary = call_mistral(messages=[{"role":"user","content":prompt}], temperature=0.3, max_tokens=512)
@@ -659,7 +711,6 @@ def lease_summarization_ui(conn):
             save_interaction(conn, "lease_summary_pagewise", uploaded_file.name, json.dumps({f"page_{i}": pages[i-1] for i in range(1, len(pages)+1)}))
             st.session_state['last_summary'] = parts
         st.rerun()
-
 
 def deal_structuring_ui(conn):
     """Enhanced deal structuring with persistent strategy chat until cleared."""
