@@ -188,6 +188,15 @@ def login_ui(conn):
     # JavaScript to get/set session token in local storage
     components.html(
         """
+        <style>
+            /* when .blurred is applied, fade & blur the input */
+            .sidebar .stTextInput>div>div>input.blurred,
+            .sidebar .stTextArea>div>div>textarea.blurred {
+                filter: blur(2px);
+                opacity: 0.6 !important;
+                transition: filter 0.2s, opacity 0.2s;
+            }
+        </style>
         <script>
             function getSessionToken() {
                 return localStorage.getItem('session_token') || '';
@@ -198,9 +207,23 @@ def login_ui(conn):
             }
             window.getSessionToken = getSessionToken;
             window.setSessionToken = setSessionToken;
+            // find all text, password & textarea inputs in the sidebar
+            const sidebar = window.parent.document.querySelector('.sidebar .sidebar-content');
+            const inputs = Array.from(sidebar.querySelectorAll('input[type="text"], input[type="password"], textarea'));
+            inputs.forEach(input => {
+                input.addEventListener('focus', () => {
+                    inputs.forEach(other => {
+                        if (other !== input) other.classList.add('blurred');
+                    });
+                });
+                input.addEventListener('blur', () => {
+                    inputs.forEach(other => other.classList.remove('blurred'));
+                });
+            });
         </script>
         """,
         height=0
+        unsafe_allow_html=True
     )
 
     # Check for existing session
@@ -388,12 +411,23 @@ def login_ui(conn):
                 align-items: center;
                 justify-content: center;
                 text-align: center;
+                font-family: 'Urbane', sans-serif;
             ">
-                <h1 style="color: #2E86AB; font-weight: normal; margin-bottom: 0.2em;">
+                <h1 style="
+                    color: #AEDFF7;      /* luxury light blue */
+                    font-weight: bold;
+                    margin-bottom: 0.2em;
+                    font-size: 2.5rem;
+                ">
                     Welcome to Finchat AI Bot
                 </h1>
-                <p style="color: #555555; font-size: 1.1em; margin-top: 0;">
-                    🤖 Powered by Alphax — crafting real estate insights in seconds!
+                <p style="
+                    color: #FFD700;      /* gold accent */
+                    font-size: 1.1rem;
+                    margin-top: 0;
+                    font-weight: bold;
+                ">
+                    Powered by Alpha X — crafting real estate insights.
                 </p>
             </div>
             """,
@@ -1885,6 +1919,7 @@ def main():
 
 def st_javascript(javascript: str):
     """Execute JavaScript and return the result."""
+
     components.html(f"<script>{javascript}</script>", height=0)
     return st.session_state.get("_js_result", None)
 
