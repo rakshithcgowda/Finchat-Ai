@@ -243,7 +243,43 @@ def login_ui(conn):
         </style>
         """,
         unsafe_allow_html=True
+    )    # … your existing st.sidebar.markdown(…login CSS…)…
+    st.sidebar.markdown(
+        """
+        <style>
+            /* ---------- luxury navy & gold ---------- */
+            .sidebar .sidebar-content {
+                background-color: #001F3F !important;   /* navy */
+                color: #FFD700 !important;             /* gold */
+            }
+            /* Urbane Bold everywhere on login */
+            .stSidebar [role="tablist"] button,
+            .stTextInput>div>div>input,
+            .stTextArea>div>div>textarea,
+            .stButton>button {
+                font-family: 'Urbane', sans-serif !important;
+                font-weight: bold !important;
+            }
+            /* inputs/textareas */
+            .stTextInput>div>div>input,
+            .stTextArea>div>div>textarea {
+                background-color: #001F3F !important;
+                color: #FFD700 !important;
+                border: 1px solid #FFD700 !important;
+            }
+            /* buttons */
+            .stButton>button {
+                background-color: #FFD700 !important;
+                color: #001F3F !important;
+                border: none !important;
+            }
+            /* hide the feature‐nav until logged in */
+            .feature-button { display: none !important; }
+        </style>
+        """,
+        unsafe_allow_html=True
     )
+
 
     login_tab, register_tab = st.sidebar.tabs(["Login", "Register"])
 
