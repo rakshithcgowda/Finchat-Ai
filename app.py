@@ -223,7 +223,6 @@ def login_ui(conn):
         </script>
         """,
         height=0,
-        unsafe_allow_html=True,
     )
 
     # Check for existing session
