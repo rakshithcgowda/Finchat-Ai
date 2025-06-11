@@ -79,9 +79,9 @@ def init_db(db_path: str = "users.db"):
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS subscriptions (
             username TEXT PRIMARY KEY,
-            LeaseBrief Buddy BOOLEAN DEFAULT 0,
-            Property-Guru BOOLEAN DEFAULT 0,
-            Offer Buddy BOOLEAN DEFAULT 0,
+            Lease Summarization BOOLEAN DEFAULT 0,
+            Deal Structuring BOOLEAN DEFAULT 0,
+            Offer Generator BOOLEAN DEFAULT 0,
             FOREIGN KEY(username) REFERENCES users(username)
         )
     """)
