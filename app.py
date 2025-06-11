@@ -5,6 +5,7 @@ import sqlite3
 import time
 import bcrypt
 import docx
+from docx.shared import Pt  # Added import to fix the error
 from fpdf import FPDF
 import google.generativeai as genai
 from PyPDF2 import PdfReader
@@ -74,7 +75,7 @@ def init_db(db_path: str = "users.db"):
                 cursor.execute(f"ALTER TABLE users ADD COLUMN {col} TEXT")
             except sqlite3.OperationalError:
                 pass
-
+    
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS subscriptions (
             username TEXT PRIMARY KEY,
@@ -84,7 +85,7 @@ def init_db(db_path: str = "users.db"):
             FOREIGN KEY(username) REFERENCES users(username)
         )
     """)
-
+    
     cursor.execute(
         """
         CREATE TABLE IF NOT EXISTS interactions (
@@ -255,7 +256,7 @@ def lease_summarization_ui(conn):
 
     ai_engine = st.radio(
         "Select AI Model",
-        ["in-depth"],
+        ["DeepSeek", "Gemini Pro", "Mistral Large"],
         index=0,
         horizontal=True,
         key="lease_ai_engine"
@@ -532,8 +533,6 @@ def lease_summarization_ui(conn):
             save_interaction(conn, "lease_summary_pagewise", uploaded_file.name, json.dumps({f"page_{i}": pages[i-1] for i in range(1, len(pages)+1)}))
             st.session_state['last_summary'] = parts
         st.rerun()
-
-
 
 def deal_structuring_ui(conn):
     """Enhanced deal structuring with persistent strategy chat until cleared, using buyer and seller details."""
@@ -1518,46 +1517,6 @@ def ocr_pdf_to_searchable(input_pdf_bytes, ocr_model=None):
     except Exception as e:
         st.error(f"OCR PDF conversion failed: {str(e)}")
         return None
-def login_ui(conn):
-    """Handle user login with username and password verification"""
-    st.title("🔐 Login to Property Deals AI")
-    st.markdown("Please enter your credentials to access the platform.")
-
-    with st.form("login_form"):
-        username = st.text_input("Username", key="login_username")
-        password = st.text_input("Password", type="password", key="login_password")
-        submitted = st.form_submit_button("Login")
-
-        if submitted:
-            if not username or not password:
-                st.error("Please provide both username and password.")
-                return
-
-            cursor = conn.cursor()
-            cursor.execute(
-                "SELECT password, role, location_id FROM users WHERE username = ?",
-                (username,)
-            )
-            user = cursor.fetchone()
-
-            if user and verify_password(user[0], password):
-                st.session_state.logged_in = True
-                st.session_state.username = username
-                st.session_state.role = user[1]
-                st.session_state.location_id = user[2] if user[2] else None
-
-                # Update last login timestamp
-                cursor.execute(
-                    "UPDATE users SET last_login = ? WHERE username = ?",
-                    (datetime.now().strftime("%Y-%m-%d %H:%M:%S"), username)
-                )
-                conn.commit()
-
-                st.success(f"Welcome, {username}!")
-                time.sleep(1)
-                st.rerun()
-            else:
-                st.error("Invalid username or password.")
 
 # ─── OCR PDF Converter UI Function ─────────────────────────────────────────────
 import io
@@ -1722,6 +1681,51 @@ def ocr_pdf_ui(conn):
             f"{uploaded_file.name} → searchable PDF",
             f"Engine={ocr_engine}, DPI={dpi}, Lang={language}"
         )
+
+def login_ui(conn):
+    """Handle user login with username and password verification"""
+    st.title("🔐 Login to Property Deals AI")
+    st.markdown("Please enter your credentials to access the platform.")
+
+    with st.form("login_form"):
+        username = st.text_input("Username", key="login_username")
+        password = st.text_input("Password", type="password", key="login_password")
+        submitted = st.form_submit_button("Login")
+
+        if submitted:
+            if not username or not password:
+                st.error("Please provide both username and password.")
+                return
+
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT password, role, location_id FROM users WHERE username = ?",
+                (username,)
+            )
+            user = cursor.fetchone()
+
+            if user and verify_password(user[0], password):
+                st.session_state.logged_in = True
+                st.session_state.username = username
+                st.session_state.role = user[1]
+                st.session_state.location_id = user[2] if user[2] else None
+
+                # Update last login timestamp
+                cursor.execute(
+                    "UPDATE users SET last_login = ? WHERE username = ?",
+                    (datetime.now().strftime("%Y-%m-%d %H:%M:%S"), username)
+                )
+                conn.commit()
+
+                st.success(f"Welcome, {username}!")
+                time.sleep(1)
+                st.rerun()
+            else:
+                st.error("Invalid username or password.")
+
+
+
+
 def main():
     """Main application function with comprehensive error handling and persistent outputs"""
     # Configure page
@@ -1830,7 +1834,8 @@ def main():
         features.append("Deal Structuring")
     if st.session_state.subscription.get("offer_generator") or st.session_state.role == "admin":
         features.append("Offer Generator")
-        features.append("History")  # History is always available
+
+    features.append("History")  # History is always available
 
     if st.session_state.role == "admin":
         features.insert(-1, "Admin Portal")
