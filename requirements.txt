@@ -16,3 +16,4 @@ pdfplumber
 torch
 torchvision
 transformers
+PyGithub
