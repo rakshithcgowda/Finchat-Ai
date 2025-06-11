@@ -1830,8 +1830,7 @@ def main():
         features.append("Deal Structuring")
     if st.session_state.subscription.get("offer_generator") or st.session_state.role == "admin":
         features.append("Offer Generator")
-
-    features.append("History")  # History is always available
+        features.append("History")  # History is always available
 
     if st.session_state.role == "admin":
         features.insert(-1, "Admin Portal")
