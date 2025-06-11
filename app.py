@@ -79,9 +79,9 @@ def init_db(db_path: str = "users.db"):
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS subscriptions (
             username TEXT PRIMARY KEY,
-            lease_analysis BOOLEAN DEFAULT 0,
-            deal_structuring BOOLEAN DEFAULT 0,
-            offer_generator BOOLEAN DEFAULT 0,
+            LeaseBrief Buddy BOOLEAN DEFAULT 0,
+            Property-Guru BOOLEAN DEFAULT 0,
+            Offer Buddy BOOLEAN DEFAULT 0,
             FOREIGN KEY(username) REFERENCES users(username)
         )
     """)
@@ -256,7 +256,7 @@ def lease_summarization_ui(conn):
 
     ai_engine = st.radio(
         "Select AI Model",
-        ["DeepSeek", "Gemini Pro", "Mistral Large"],
+        ["in-depth"],
         index=0,
         horizontal=True,
         key="lease_ai_engine"
@@ -586,13 +586,13 @@ def deal_structuring_ui(conn):
         occupancy_status = st.selectbox("Occupancy Status", ["Vacant", "Owner-Occupied", "Tenant-Occupied", "Other"], key="occupancy_status")
         property_condition = st.text_area("Property Condition & Repairs Needed", placeholder="e.g., good condition, needs roof replacement, etc.", key="property_condition")
 
-    with st.expander("Strategy Preferences"):
-        col1, col2 = st.columns(2)
-        with col1:
-            risk_tolerance = st.select_slider("Risk Tolerance", ["Conservative", "Moderate", "Aggressive"], key="strategy_risk")
-            creativity_level = st.select_slider("Creativity Level", ["Standard", "Creative", "Outside-the-box"], key="strategy_creativity")
-        with col2:
-            ai_model = st.radio("AI Model", ["Gemini", "Mistral", "DeepSeek"], horizontal=True, key="strategy_ai_model")
+    # with st.expander("Strategy Preferences"):
+    #     col1, col2 = st.columns(2)
+    #     with col1:
+    #         risk_tolerance = st.select_slider("Risk Tolerance", ["Conservative", "Moderate", "Aggressive"], key="strategy_risk")
+    #         creativity_level = st.select_slider("Creativity Level", ["Standard", "Creative", "Outside-the-box"], key="strategy_creativity")
+    #     with col2:
+    #         ai_model = st.radio("AI Model", ["in-depth"], horizontal=True, key="strategy_ai_model")
 
     # Generate strategies
     if st.button("Generate Strategies", type="primary", key="gen_strat"):
@@ -837,7 +837,7 @@ def offer_generator_ui(conn):
         st.session_state.offer_data['input_method'] = method
         with st.expander("AI Configuration"):
             ai_model = st.radio(
-                "AI Model Preference", ["Gemini", "Mistral", "DeepSeek"], horizontal=True, key="offer_ai_model"
+                "AI Model Preference", ["in-depth"], horizontal=True, key="offer_ai_model"
             )
             creativity = st.slider("Creativity Level", 0.0, 1.0, 0.3, key="offer_creativity")
             detail_level = st.select_slider(
