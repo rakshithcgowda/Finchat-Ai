@@ -1518,6 +1518,46 @@ def ocr_pdf_to_searchable(input_pdf_bytes, ocr_model=None):
     except Exception as e:
         st.error(f"OCR PDF conversion failed: {str(e)}")
         return None
+def login_ui(conn):
+    """Handle user login with username and password verification"""
+    st.title("🔐 Login to Property Deals AI")
+    st.markdown("Please enter your credentials to access the platform.")
+
+    with st.form("login_form"):
+        username = st.text_input("Username", key="login_username")
+        password = st.text_input("Password", type="password", key="login_password")
+        submitted = st.form_submit_button("Login")
+
+        if submitted:
+            if not username or not password:
+                st.error("Please provide both username and password.")
+                return
+
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT password, role, location_id FROM users WHERE username = ?",
+                (username,)
+            )
+            user = cursor.fetchone()
+
+            if user and verify_password(user[0], password):
+                st.session_state.logged_in = True
+                st.session_state.username = username
+                st.session_state.role = user[1]
+                st.session_state.location_id = user[2] if user[2] else None
+
+                # Update last login timestamp
+                cursor.execute(
+                    "UPDATE users SET last_login = ? WHERE username = ?",
+                    (datetime.now().strftime("%Y-%m-%d %H:%M:%S"), username)
+                )
+                conn.commit()
+
+                st.success(f"Welcome, {username}!")
+                time.sleep(1)
+                st.rerun()
+            else:
+                st.error("Invalid username or password.")
 
 # ─── OCR PDF Converter UI Function ─────────────────────────────────────────────
 import io
