@@ -5,7 +5,7 @@ import sqlite3
 import time
 import bcrypt
 import docx
-from docx.shared import Pt  # Added import to fix the error
+from docx.shared import Pt
 from fpdf import FPDF
 import google.generativeai as genai
 from PyPDF2 import PdfReader
@@ -16,8 +16,6 @@ from datetime import datetime
 from typing import List, Dict
 from mistralai import Mistral
 import requests
-import pytesseract
-from pdf2image import convert_from_bytes
 import re
 from openai import OpenAI
 from PIL import Image
@@ -25,6 +23,10 @@ import pdfplumber
 import torch
 from torchvision import transforms
 import uuid
+import base64
+import tempfile
+from docx import Document
+import logging
 
 # ─── Configuration ──────────────────────────────────────────────────────────────
 GOOGLE_API_KEY = os.environ.get(
@@ -41,6 +43,8 @@ DEEPSEEK_CLIENT = OpenAI(
     base_url="https://api.deepseek.com/v1"
 )
 
+OCR_API_KEY = "PDF8V7778Y0TX"
+
 BRAND_COLORS = {
     "primary": "#2E86AB",
     "secondary": "#F18F01",
@@ -50,6 +54,159 @@ BRAND_COLORS = {
 
 genai.configure(api_key=GOOGLE_API_KEY)
 mistral_client = Mistral(api_key=MISTRAL_API_KEY)
+
+# ─── OCR.space API Functions ───────────────────────────────────────────────────
+OCR_ENDPOINTS = [
+    "https://apipro1.ocr.space/parse/image",
+    "https://apipro2.ocr.space/parse/image",
+]
+
+def ocr_space_file_pro(
+    filename: str,
+    api_key: str = "PDF8V7778Y0TX",
+    language: str = "eng",
+    overlay: bool = False,
+    retries: int = 2,
+    timeout: int = 60
+) -> dict:
+    """
+    Send a PDF or image to OCR.space PRO, with automatic datacenter fail-over.
+    Returns the full JSON response from whichever endpoint succeeds.
+    """
+    if not os.path.exists(filename):
+        raise FileNotFoundError(f"File not found: {filename}")
+
+    # Determine MIME and filetype from extension
+    ext = os.path.splitext(filename)[1].lower()
+    if ext == ".pdf":
+        filetype, mimetype = "PDF", "application/pdf"
+    elif ext in (".jpg", ".jpeg"):
+        filetype, mimetype = "JPG", "image/jpeg"
+    elif ext == ".png":
+        filetype, mimetype = "PNG", "image/png"
+    else:
+        filetype, mimetype = None, "application/octet-stream"
+
+    payload = {
+        "apikey": api_key,
+        "language": language,
+        "isOverlayRequired": overlay,
+        "detectOrientation": True,
+        "scale": True,
+        "isTable": True,
+        "OCREngine": 2,
+    }
+    if filetype:
+        payload["filetype"] = filetype
+
+    last_error = None
+    # Try each endpoint in order
+    for endpoint in OCR_ENDPOINTS:
+        for attempt in range(1, retries + 1):
+            try:
+                with open(filename, "rb") as f:
+                    files = {
+                        "file": (os.path.basename(filename), f, mimetype)
+                    }
+                    resp = requests.post(
+                        endpoint,
+                        data=payload,
+                        files=files,
+                        timeout=timeout
+                    )
+                resp.raise_for_status()
+                result = resp.json()
+
+                # If the OCR engine itself reports an error
+                if result.get("IsErroredOnProcessing"):
+                    msg = result.get("ErrorMessage") or result.get("ErrorDetails") or "Unknown OCR error"
+                    raise RuntimeError(f"OCR API error: {msg}")
+
+                # Success! Return the JSON
+                return result
+
+            except Exception as e:
+                last_error = e
+                # on last retry for this endpoint, break out to try the next DC
+                if attempt == retries:
+                    break
+                time.sleep(2 ** attempt)
+
+    # If we get here, all endpoints & retries failed
+    raise RuntimeError(f"All OCR.space PRO endpoints failed: {last_error}")
+
+
+
+def ocr_space_url(url, overlay=False, api_key='PDF8V7778Y0TX', language='eng', retries=3, timeout=60):
+    """Enhanced OCR.space GET API request with remote image URL.
+    Features:
+    - URL validation
+    - Smart retry with exponential backoff
+    - Image type detection
+    - Quality control
+    """
+    # Validate URL format
+    if not re.match(r'^https?://', url, re.I):
+        raise ValueError("Invalid URL format")
+    
+    params = {
+        'apikey': api_key,
+        'url': url,
+        'language': language,
+        'isOverlayRequired': overlay,
+        'detectOrientation': True,
+        'scale': True,
+        'OCREngine': 2  # Advanced engine
+    }
+    
+    for attempt in range(retries):
+        try:
+            with st.spinner(f"Processing remote image (Attempt {attempt + 1}/{retries})..."):
+                url_endpoint = OCR_ENDPOINTS[0].replace("/parse/image", "/parse/imageurl")
+                r = requests.post(
+                    url_endpoint,
+                    data=params,
+                    timeout=timeout
+                )
+            r.raise_for_status()
+            
+            result = json.loads(r.content.decode())
+            
+            # Check OCR quality metrics
+            if result.get('OCRExitCode') not in [1, 2]:
+                error_msg = result.get('ErrorMessage', 'Unknown OCR error')
+                if attempt == retries - 1:
+                    raise Exception(f"OCR failed: {error_msg}")
+                time.sleep(2 ** attempt)  # Exponential backoff
+                continue
+                
+            # Validate parsed results
+            parsed_results = result.get('ParsedResults', [])
+            if not parsed_results:
+                if attempt == retries - 1:
+                    raise Exception("No OCR results returned")
+                continue
+                
+            # Check text confidence
+            first_result = parsed_results[0]
+            if 'ParsedText' not in first_result:
+                if attempt == retries - 1:
+                    raise Exception("No parsed text in OCR results")
+                continue
+                
+            return r.content.decode()
+            
+        except requests.exceptions.RequestException as e:
+            if attempt == retries - 1:
+                raise Exception(f"OCR API request failed after {retries} attempts: {str(e)}")
+            time.sleep(2 ** attempt)
+        except json.JSONDecodeError:
+            if attempt == retries - 1:
+                raise Exception("Invalid JSON response from OCR API")
+            time.sleep(1)
+    
+    return ""
+
 
 # ─── Database Helpers ──────────────────────────────────────────────────────────
 def init_db(db_path: str = "users.db"):
@@ -79,9 +236,9 @@ def init_db(db_path: str = "users.db"):
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS subscriptions (
             username TEXT PRIMARY KEY,
-            lease_analysis    INTEGER DEFAULT 0,
-            deal_structuring  INTEGER DEFAULT 0,
-            offer_generator   INTEGER DEFAULT 0,
+            lease_analysis INTEGER DEFAULT 0,
+            deal_structuring INTEGER DEFAULT 0,
+            offer_generator INTEGER DEFAULT 0,
             FOREIGN KEY(username) REFERENCES users(username)
         )
     """)
@@ -229,30 +386,292 @@ def save_interaction(conn, feature: str, input_text: str, output_text: str):
         )
         conn.commit()
 
+def convert_pdf_to_images(pdf_file, output_dir, dpi=300):
+    """Convert PDF to high-quality images for OCR"""
+    images = []
+    try:
+        with pdfplumber.open(pdf_file) as pdf:
+            for i, page in enumerate(pdf.pages):
+                img = page.to_image(resolution=dpi).original
+                img_path = os.path.join(output_dir, f"page_{i+1}.png")
+                img.save(img_path, "PNG", quality=100)
+                images.append(img_path)
+    except Exception as e:
+        st.error(f"PDF to image conversion failed: {e}")
+    return images
+
+def preprocess_image_for_ocr(img):
+    """Enhance image quality for better OCR results"""
+    try:
+        # Convert to grayscale
+        if img.mode != 'L':
+            img = img.convert('L')
+        
+        # Enhance contrast
+        from PIL import ImageEnhance
+        enhancer = ImageEnhance.Contrast(img)
+        img = enhancer.enhance(2.0)
+        
+        # Remove noise
+        img = img.point(lambda x: 0 if x < 128 else 255, '1')
+        
+        return img
+    except Exception as e:
+        st.warning(f"Image preprocessing failed: {e}")
+        return img
+
+
+# Configure logging for debugging
+logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
+
+def extract_text_with_ocr(uploaded_file=None, file_type: str = "pdf", url: str = None):
+    """Enhanced text extraction with OCR.space API for PDFs and images.
+    Features:
+    - Handles PDFs with selectable text, image-based text, or both
+    - Optimized for OCR.space API (https://ocr.space/OCRAPI)
+    - Merges direct text and OCR results
+    - Detailed logging for debugging
+    - Progress tracking and robust error handling
+    """
+    def validate_extracted_text(text: str) -> bool:
+        """Check if extracted text is meaningful"""
+        text = text.strip()
+        if not text:
+            return False
+        if len(text) < 30 or len(text.split()) < 5:  # Relaxed thresholds for robustness
+            return False
+        return True
+
+    def clean_text(text: str) -> str:
+        """Clean extracted text by normalizing spaces and removing control characters"""
+        text = re.sub(r'\s+', ' ', text)  # Normalize spaces
+        text = re.sub(r'[^\x20-\x7E\n]', '', text)  # Remove non-printable characters
+        return text.strip()
+
+    try:
+        pages_text = []
+        used_ocr = False
+        logging.info(f"Starting text extraction for file_type={file_type}, url={url}")
+
+        # Handle remote URL case (JPG only)
+        if url and not uploaded_file:
+            if not url.lower().endswith(('.jpg', '.jpeg')):
+                st.error("Please provide a valid JPG URL.")
+                logging.error(f"Invalid URL format: {url}")
+                return []
+            st.info("Processing remote JPG with OCR.space API...")
+            logging.info(f"Processing URL: {url}")
+            response = ocr_space_url(
+                url=url,
+                overlay=False,
+                api_key=OCR_API_KEY,
+                language='eng',
+                retries=3,
+                timeout=60
+            )
+            try:
+                result = json.loads(response)
+                if result.get("OCRExitCode") in [1, 2]:
+                    parsed_text = result.get("ParsedResults", [{}])[0].get("ParsedText", "")
+                    cleaned_text = clean_text(parsed_text)
+                    if validate_extracted_text(cleaned_text):
+                        pages_text.append(cleaned_text)
+                        logging.info(f"Successfully extracted text from URL: {len(cleaned_text)} chars")
+                    else:
+                        st.warning("Low-quality text from URL. Attempting file-based OCR...")
+                        logging.warning(f"Low-quality text from URL: {cleaned_text[:100]}")
+                        # Fallback to downloading and processing
+                        img_response = requests.get(url, timeout=30)
+                        img_response.raise_for_status()
+                        with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as temp_file:
+                            temp_file.write(img_response.content)
+                            temp_file_path = temp_file.name
+                        response = ocr_space_file_pro(
+                            filename=temp_file_path,
+                            api_key=OCR_API_KEY,
+                            language='eng'
+                        )
+                        parsed_text = response.get("ParsedResults", [{}])[0].get("ParsedText", "")
+                        cleaned_text = clean_text(parsed_text)
+                        pages_text.append(cleaned_text)
+                        used_ocr = True
+                        os.unlink(temp_file_path)
+                        logging.info(f"Fallback OCR completed: {len(cleaned_text)} chars")
+                else:
+                    error_msg = result.get("ErrorMessage", "Unknown error")
+                    st.error(f"OCR failed for URL: {error_msg}")
+                    logging.error(f"OCR failed for URL: {error_msg}")
+                    pages_text.append("")
+            except json.JSONDecodeError as e:
+                st.error("Invalid OCR response from URL.")
+                logging.error(f"JSON decode error: {str(e)}")
+                pages_text.append("")
+            return pages_text
+
+        # Handle uploaded file case
+        if uploaded_file:
+            # PDF processing
+            if file_type == "pdf":
+                with tempfile.TemporaryDirectory() as temp_dir:
+                    # Direct text extraction
+                    direct_pages = []
+                    try:
+                        with pdfplumber.open(uploaded_file) as pdf:
+                            num_pages = len(pdf.pages)
+                            logging.info(f"PDF has {num_pages} pages")
+                            for i, page in enumerate(pdf.pages):
+                                text = page.extract_text() or ""
+                                cleaned_text = clean_text(text)
+                                direct_pages.append(cleaned_text)
+                                logging.info(f"Direct extraction page {i+1}: {len(cleaned_text)} chars")
+                    except Exception as e:
+                        st.warning(f"Direct text extraction failed: {e}")
+                        logging.error(f"Direct extraction error: {str(e)}")
+                        direct_pages = []
+
+                    # Convert PDF to images for OCR
+                    uploaded_file.seek(0)
+                    images = convert_pdf_to_images(uploaded_file, temp_dir, dpi=300)
+                    if not images:
+                        st.error("Failed to convert PDF to images for OCR.")
+                        logging.error("No images generated from PDF")
+                        return []
+
+                    ocr_pages = []
+                    progress = st.progress(0)
+                    for i, img_path in enumerate(images):
+                        try:
+                            # Preprocess image
+                            img = Image.open(img_path)
+                            img = preprocess_image_for_ocr(img)
+                            with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as temp_img:
+                                img.save(temp_img.name, "PNG", quality=100)
+                                logging.info(f"Processing image for page {i+1}: {temp_img.name}")
+                                response = ocr_space_file_pro(
+                                    filename=temp_img.name,
+                                    api_key=OCR_API_KEY,
+                                    language='eng',
+                                    retries=2,
+                                    timeout=60
+                                )
+                            parsed_text = response.get("ParsedResults", [{}])[0].get("ParsedText", "")
+                            cleaned_text = clean_text(parsed_text)
+                            ocr_pages.append(cleaned_text)
+                            used_ocr = True
+                            os.unlink(temp_img.name)
+                            logging.info(f"OCR page {i+1}: {len(cleaned_text)} chars")
+                        except Exception as e:
+                            st.warning(f"OCR failed for page {i+1}: {e}")
+                            logging.error(f"OCR error page {i+1}: {str(e)}")
+                            ocr_pages.append("")
+                        progress.progress((i + 1) / len(images))
+
+                    # Merge direct and OCR results
+                    for i, (direct_text, ocr_text) in enumerate(zip(direct_pages, ocr_pages)):
+                        if validate_extracted_text(direct_text) and not validate_extracted_text(ocr_text):
+                            pages_text.append(direct_text)
+                            logging.info(f"Page {i+1}: Used direct text ({len(direct_text)} chars)")
+                        elif validate_extracted_text(ocr_text):
+                            pages_text.append(ocr_text)
+                            logging.info(f"Page {i+1}: Used OCR text ({len(ocr_text)} chars)")
+                        else:
+                            combined = clean_text(direct_text + " " + ocr_text)
+                            if validate_extracted_text(combined):
+                                pages_text.append(combined)
+                                logging.info(f"Page {i+1}: Used combined text ({len(combined)} chars)")
+                            else:
+                                pages_text.append("")
+                                logging.warning(f"Page {i+1}: No meaningful text extracted")
+
+            # Image processing (JPG)
+            else:
+                st.info("Processing uploaded JPG with OCR.space API...")
+                logging.info("Processing uploaded JPG")
+                uploaded_file.seek(0)
+                with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as temp_file:
+                    img = Image.open(uploaded_file)
+                    img = preprocess_image_for_ocr(img)
+                    img.save(temp_file.name, quality=95)
+                    response = ocr_space_file_pro(
+                        filename=temp_file.name,
+                        api_key=OCR_API_KEY,
+                        language='eng',
+                        retries=2,
+                        timeout=60
+                    )
+                    os.unlink(temp_file.name)
+                parsed_text = response.get("ParsedResults", [{}])[0].get("ParsedText", "")
+                cleaned_text = clean_text(parsed_text)
+                if validate_extracted_text(cleaned_text):
+                    pages_text.append(cleaned_text)
+                    used_ocr = True
+                    logging.info(f"OCR for JPG: {len(cleaned_text)} chars")
+                else:
+                    pages_text.append("")
+                    st.error("OCR failed to extract meaningful text from JPG.")
+                    logging.error("No meaningful text from JPG")
+
+        # Validate final results
+        if not any(validate_extracted_text(p) for p in pages_text):
+            st.error("Failed to extract meaningful text from the document. Check file quality or try a different format.")
+            logging.error("No meaningful text extracted from document")
+            return []
+
+        st.session_state['used_ocr'] = used_ocr
+        logging.info(f"Extraction complete: {len(pages_text)} pages, used_ocr={used_ocr}")
+        return pages_text
+
+    except Exception as e:
+        st.error(f"Text extraction failed: {str(e)}")
+        logging.error(f"Extraction failed: {str(e)}", exc_info=True)
+        return []
+
+
 def lease_summarization_ui(conn):
-    """Lease Summarization: upload PDF and get either full-document or page-by-page summaries with model selection, persisting results for chatbot usage. Allows uploading a Word document with any content based on the summary and generates relevant output."""
+    """Lease Summarization: upload PDF or JPG, or provide a JPG URL, and get either full-document or page-by-page summaries with model selection, persisting results for chatbot usage. Allows uploading a Word document with any content based on the summary and generates relevant output. Handles non-searchable PDFs and JPG images using OCR and displays extracted text via dropdown."""
     st.header("📄 Lease Summary")
+    
     # Clear previous summary and related data
     if st.button("Clear Summary", key="clear_lease_summary"):
-        for k in ['last_file', 'last_summary', 'last_mode', 'last_engine', 'last_docx_content', 'last_docx_output']:
+        for k in ['last_file', 'last_url', 'last_summary', 'last_mode', 'last_engine', 'last_docx_content', 'last_docx_output', 'extracted_pages', 'used_ocr', 'last_selected_page_index']:
             st.session_state.pop(k, None)
         st.success("Cleared previous summary and related content.")
         st.rerun()
 
     st.markdown(
-        "Upload your lease PDF and get a **fast** and concise summary—either the full document at once or page by page."
+        "Upload your lease PDF or JPG image, or provide a public JPG URL, and get a **fast** and concise summary—either the full document at once or page by page. Non-searchable PDFs and JPG images will be processed using OCR. View extracted text before summarization."
     )
 
+    # File uploader for PDF or JPG
     uploaded_file = st.file_uploader(
-        "Upload Lease Document (PDF)", type=["pdf"], key="lease_file_uploader"
+        "Upload Lease Document (PDF or JPG)", type=["pdf", "jpg", "jpeg"], key="lease_file_uploader"
     )
-    if 'last_file' in st.session_state and uploaded_file:
-        if st.session_state.last_file != uploaded_file.name:
-            for k in ['last_summary', 'last_mode', 'last_engine', 'last_docx_content', 'last_docx_output']:
-                st.session_state.pop(k, None)
+    
+    # URL input for remote JPG
+    image_url = st.text_input("Or Enter Public JPG URL", key="lease_image_url", placeholder="e.g., https://example.com/image.jpg")
 
-    if not uploaded_file:
+    # Validate inputs
+    if uploaded_file and image_url:
+        st.error("Please provide either a file or a URL, not both.")
         return
+    elif not uploaded_file and not image_url:
+        return
+
+    # Determine input type
+    if uploaded_file:
+        file_type = "pdf" if uploaded_file.name.lower().endswith(".pdf") else "jpg"
+        input_identifier = uploaded_file.name
+    else:
+        file_type = "jpg"
+        input_identifier = image_url
+
+    # Check if input has changed
+    if 'last_file' in st.session_state and uploaded_file and st.session_state.last_file != uploaded_file.name:
+        for k in ['last_summary', 'last_mode', 'last_engine', 'last_docx_content', 'last_docx_output', 'extracted_pages', 'used_ocr', 'last_selected_page_index', 'last_url']:
+            st.session_state.pop(k, None)
+    elif 'last_url' in st.session_state and image_url and st.session_state.last_url != image_url:
+        for k in ['last_summary', 'last_mode', 'last_engine', 'last_docx_content', 'last_docx_output', 'extracted_pages', 'used_ocr', 'last_selected_page_index', 'last_file']:
+            st.session_state.pop(k, None)
 
     ai_engine = st.radio(
         "Select AI Model",
@@ -269,8 +688,81 @@ def lease_summarization_ui(conn):
         key="lease_summary_mode"
     )
 
+    # Extract text if not already done or if input has changed
+    if 'extracted_pages' not in st.session_state or \
+       (uploaded_file and st.session_state.get('last_file') != uploaded_file.name) or \
+       (image_url and st.session_state.get('last_url') != image_url):
+        if st.button("Extract Text", key="lease_extract_button"):
+            used_ocr = False
+            pages = []
+            if uploaded_file and file_type == "pdf":
+                try:
+                    reader = PdfReader(uploaded_file)
+                    pages = [page.extract_text() or "" for page in reader.pages]
+                except Exception:
+                    st.error("Failed to extract text from the PDF directly.")
+                    pages = []
+
+                # Check if extracted text is empty or insufficient
+                if not any(p.strip() for p in pages):
+                    st.info("No searchable text found in the PDF. Attempting OCR extraction...")
+                    uploaded_file.seek(0)
+                    pages = extract_text_with_ocr(uploaded_file=uploaded_file, file_type="pdf")
+                    used_ocr = True
+            elif uploaded_file and file_type == "jpg":
+                st.info("Processing uploaded JPG image with OCR...")
+                uploaded_file.seek(0)
+                pages = extract_text_with_ocr(uploaded_file=uploaded_file, file_type="jpg")
+                used_ocr = True
+            elif image_url:
+                # Validate URL
+                if not image_url.lower().endswith(('.jpg', '.jpeg')):
+                    st.error("Please provide a valid JPG URL.")
+                    return
+                pages = extract_text_with_ocr(file_type="jpg", url=image_url)
+                used_ocr = True
+
+            if not any(p.strip() for p in pages):
+                st.error(f"No readable text found in the {'PDF' if file_type == 'pdf' else 'JPG'} even after OCR.")
+                return
+
+            # Store extracted pages and OCR status
+            st.session_state['extracted_pages'] = pages
+            st.session_state['used_ocr'] = used_ocr
+            if uploaded_file:
+                st.session_state['last_file'] = uploaded_file.name
+            else:
+                st.session_state['last_url'] = image_url
+            st.rerun()
+
+    # Display extracted text preview if available
+    # In lease_summarization_ui, after calling extract_text_with_ocr
+    if 'extracted_pages' in st.session_state:
+        st.subheader("Extracted Text Preview")
+        page_options = [f"Page {i+1}" for i in range(len(st.session_state['extracted_pages']))] if file_type == "pdf" else ["Image"]
+        selected_page = st.selectbox(
+            "Select Page to View Extracted Text",
+            page_options,
+            key="extracted_text_dropdown",
+            index=st.session_state.get('last_selected_page_index', 0)
+        )
+        st.session_state['last_selected_page_index'] = page_options.index(selected_page)
+        page_index = page_options.index(selected_page)
+        extracted_text = st.session_state['extracted_pages'][page_index]
+        if extracted_text.strip():
+            st.text_area(
+                f"Extracted Text for {selected_page} {'(via OCR)' if st.session_state.get('used_ocr', False) else '(Direct Extraction)'}",
+                value=extracted_text,
+                height=300,
+                key=f"extracted_text_page_{page_index}"
+            )
+        else:
+            st.warning(f"No text extracted for {selected_page}. Try a different file or check the document quality.")
+
     # Display existing summary if available
-    if 'last_summary' in st.session_state and st.session_state.get('last_file') == uploaded_file.name:
+    if 'last_summary' in st.session_state and \
+       ((uploaded_file and st.session_state.get('last_file') == uploaded_file.name) or \
+        (image_url and st.session_state.get('last_url') == image_url)):
         mode = st.session_state['last_mode']
         engine = st.session_state['last_engine']
         raw = st.session_state['last_summary']
@@ -289,7 +781,7 @@ def lease_summarization_ui(conn):
 
         # Export section styling
         st.markdown("### 📥 Export Styled Summary")
-        file_base = uploaded_file.name.rsplit(".", 1)[0]
+        file_base = input_identifier.rsplit(".", 1)[0] if '.' in input_identifier else input_identifier
         file_name = st.text_input("Filename (no extension):", value=file_base, key="lease_export_name")
 
         # Sanitize and split for PDF
@@ -365,18 +857,14 @@ def lease_summarization_ui(conn):
                     st.error("No valid content found in the document.")
                 else:
                     st.session_state['last_docx_content'] = docx_content
-                    # st.success(f"Document uploaded successfully. Content length: {len(docx_content)} characters.")
-                    # with st.expander("Document Content Preview"):
-                    #     st.write(docx_content[:1000] + ("…" if len(docx_content) > 1000 else ""))
             except Exception as e:
                 st.error(f"Failed to process Word document: {e}")
                 return
 
         # Display existing processed content and output if available
-        if 'last_docx_content' in st.session_state and 'last_docx_output' in st.session_state and st.session_state.get('last_file') == uploaded_file.name:
-            # st.subheader("Uploaded Document and AI Response")
-            # with st.expander("Uploaded Document Content"):
-            #     st.write(st.session_state['last_docx_content'])
+        if 'last_docx_content' in st.session_state and 'last_docx_output' in st.session_state and \
+           ((uploaded_file and st.session_state.get('last_file') == uploaded_file.name) or \
+            (image_url and st.session_state.get('last_url') == image_url)):
             with st.expander(f"AI Response ({engine})"):
                 st.write(st.session_state['last_docx_output'])
             st.divider()
@@ -439,7 +927,7 @@ def lease_summarization_ui(conn):
         # Generate output if needed
         if docx_file and 'last_docx_content' in st.session_state and 'last_docx_output' not in st.session_state:
             if st.button("Generate Response", key="lease_generate_response"):
-                with st.spinner("Generating response based on uploaded document…"):
+                with st.spinner("Generating response based on uploaded document..."):
                     prompt = (
                         f"Lease Summary:\n{summary_content}\n\n"
                         f"Uploaded Document Content:\n{st.session_state['last_docx_content']}\n\n"
@@ -458,20 +946,13 @@ def lease_summarization_ui(conn):
                     save_interaction(conn, "lease_docx_processing", st.session_state['last_docx_content'], response)
                     st.rerun()
 
-    # If no existing summary, generate a new one
-    if st.button("Generate Summary", key="lease_generate_button"):
-        try:
-            reader = PdfReader(uploaded_file)
-            pages = [page.extract_text() or "" for page in reader.pages]
-        except Exception:
-            st.error("Failed to extract text from the PDF.")
+    # Generate summary if extracted pages are available and button is clicked
+    if 'extracted_pages' in st.session_state and st.button("Generate Summary", key="lease_generate_button"):
+        pages = st.session_state['extracted_pages']
+        if not any(p.strip() for p in pages):
+            st.error("No readable text available for summarization.")
             return
 
-        if not any(pages):
-            st.error("No readable text found in the PDF.")
-            return
-
-        st.session_state['last_file'] = uploaded_file.name
         st.session_state['last_mode'] = summary_mode
         st.session_state['last_engine'] = ai_engine
 
@@ -493,7 +974,7 @@ def lease_summarization_ui(conn):
                 final = "\n\n".join(summaries)
             st.subheader("Full Document Summary")
             st.write(final)
-            save_interaction(conn, "lease_summary_full", uploaded_file.name, final)
+            save_interaction(conn, "lease_summary_full", input_identifier, final)
             st.session_state['last_summary'] = final
 
         else:
@@ -504,7 +985,7 @@ def lease_summarization_ui(conn):
                     parts.append("(no text detected)")
                     st.markdown(f"**Page {i}:** _(no text detected)_")
                 else:
-                    with st.spinner(f"Fast summary for page {i}…"):
+                    with st.spinner(f"Fast summary for page {i}..."):
                         prompt = (
                             f"Summarize page {i} of this lease agreement in clear, concise language, covering all information:\n\n{pg}"
                         )
@@ -516,10 +997,11 @@ def lease_summarization_ui(conn):
                         st.markdown(f"**Page {i} Summary:**")
                         st.write(summary)
                         parts.append(summary)
-            save_interaction(conn, "lease_summary_pagewise", uploaded_file.name, json.dumps({f"page_{i}": pages[i-1] for i in range(1, len(pages)+1)}))
+            save_interaction(conn, "lease_summary_pagewise", input_identifier, json.dumps({f"page_{i}": pages[i-1] for i in range(1, len(pages)+1)}))
             st.session_state['last_summary'] = parts
 
         st.rerun()
+
 
 def deal_structuring_ui(conn):
     """Enhanced deal structuring with persistent strategy chat until cleared, using buyer and seller details."""
@@ -559,7 +1041,7 @@ def deal_structuring_ui(conn):
         st.markdown("### Seller Motivation & Situation")
         col1, col2 = st.columns(2)
         with col1:
-            seller_motivation = st.text_area("Seller’s Motivation & Urgency", placeholder="e.g., relocating, financial distress, etc.", key="seller_motivation")
+            seller_motivation = st.text_area("Seller's Motivation & Urgency", placeholder="e.g., relocating, financial distress, etc.", key="seller_motivation")
             financial_difficulties = st.selectbox("Seller Financial Difficulties", ["None", "Mortgage Arrears", "Negative Equity", "Other"], key="seller_financial")
         with col2:
             if financial_difficulties == "Mortgage Arrears":
@@ -572,14 +1054,6 @@ def deal_structuring_ui(conn):
         property_type = st.selectbox("Property Type", ["Residential", "Commercial", "Mixed-Use", "Land"], key="property_type")
         occupancy_status = st.selectbox("Occupancy Status", ["Vacant", "Owner-Occupied", "Tenant-Occupied", "Other"], key="occupancy_status")
         property_condition = st.text_area("Property Condition & Repairs Needed", placeholder="e.g., good condition, needs roof replacement, etc.", key="property_condition")
-
-    # with st.expander("Strategy Preferences"):
-    #     col1, col2 = st.columns(2)
-    #     with col1:
-    #         risk_tolerance = st.select_slider("Risk Tolerance", ["Conservative", "Moderate", "Aggressive"], key="strategy_risk")
-    #         creativity_level = st.select_slider("Creativity Level", ["Standard", "Creative", "Outside-the-box"], key="strategy_creativity")
-    #     with col2:
-    #         ai_model = st.radio("AI Model", ["in-depth"], horizontal=True, key="strategy_ai_model")
 
     # Generate strategies
     if st.button("Generate Strategies", type="primary", key="gen_strat"):
@@ -605,23 +1079,14 @@ def deal_structuring_ui(conn):
             f"- Property Type: {property_type}\n"
             f"- Occupancy Status: {occupancy_status}\n"
             f"- Property Condition & Repairs: {property_condition}\n\n"
-            f"Generate {risk_tolerance.lower()} strategies with {creativity_level.lower()} approaches for this real estate deal."
+            f"Generate strategies for this real estate deal."
         )
         with st.spinner("Developing strategies..."):
-            if ai_model == "Gemini":
-                strategies = call_gemini("deal_strategy", prompt)
-            elif ai_model == "Mistral":
-                messages = [
-                    {"role": "system", "content": "You are a real estate investment strategist. Provide creative deal structuring options."},
-                    {"role": "user",   "content": prompt}
-                ]
-                strategies = call_mistral(messages=messages)
-            else:  # DeepSeek
-                messages = [
-                    {"role": "system", "content": "You are an expert real estate strategist. Suggest creative deal structures with pros/cons."},
-                    {"role": "user",   "content": prompt}
-                ]
-                strategies = call_deepseek(messages)
+            messages = [
+                {"role": "system", "content": "You are a real estate investment strategist. Provide creative deal structuring options."},
+                {"role": "user",   "content": prompt}
+            ]
+            strategies = call_mistral(messages=messages)
 
         # Record and display
         st.session_state.deal_strategy_memory.append(("assistant", strategies))
@@ -689,35 +1154,15 @@ def deal_structuring_ui(conn):
                 f"{selected_text}\n\n"
                 f"Feedback: {feedback}"
             )
-            if ai_model == "Gemini":
-                refinement = call_gemini("deal_strategy", refinement_prompt)
-            elif ai_model == "Mistral":
-                messages = [
-                    {"role": "system", "content": "Refine the selected strategy based on user feedback."},
-                    {"role": "user",   "content": refinement_prompt}
-                ]
-                refinement = call_mistral(messages=messages)
-            else:  # DeepSeek
-                messages = [
-                    {"role": "system", "content": "Refine this real estate strategy based on the provided feedback."},
-                    {"role": "user",   "content": refinement_prompt}
-                ]
-                refinement = call_deepseek(messages)
+            messages = [
+                {"role": "system", "content": "Refine the selected strategy based on user feedback."},
+                {"role": "user",   "content": refinement_prompt}
+            ]
+            refinement = call_mistral(messages=messages)
 
             st.session_state.deal_strategy_memory.append(("assistant", refinement))
             st.chat_message("assistant").write(refinement)
             save_interaction(conn, "deal_strategy_refinement", selected_text, refinement)
-
-# -------------------------------------------------offer generator----------------------------------------------------------------------------------
-
-import streamlit as st
-import io
-import json
-from fpdf import FPDF
-from docx import Document
-from datetime import datetime
-import re
-from PyPDF2 import PdfReader
 
 def build_guided_prompt(details: dict, detail_level: str) -> str:
     """
@@ -1447,228 +1892,6 @@ def chatbot_ui(conn):
         # Save interaction
         save_interaction(conn, "chatbot", user_input, answer)
 
-
-
-
-
-def ocr_pdf_to_searchable(input_pdf_bytes, ocr_model=None):
-    """
-    Convert a non-selectable PDF (scanned document) into a searchable PDF using OCR.
-
-    Args:
-        input_pdf_bytes: Bytes of the input PDF file
-        ocr_model: Optional OCR model tuple (processor, model)
-
-    Returns:
-        Bytes of the searchable PDF
-    """
-    from fpdf import FPDF
-    from PIL import Image
-    import pytesseract
-    from pdf2image import convert_from_bytes
-
-    try:
-        # Convert PDF pages to images
-        images = convert_from_bytes(input_pdf_bytes)
-
-        # Create a new PDF
-        pdf = FPDF()
-        pdf.set_auto_page_break(auto=True, margin=15)
-
-        for img in images:
-            # Perform OCR on each image
-            if ocr_model:
-                text = predict_text_with_model(img, ocr_model)
-            else:
-                text = pytesseract.image_to_string(img)
-
-            # Create a new page
-            pdf.add_page()
-
-            # Add the original image
-            img_path = "temp_img.jpg"
-            img.save(img_path)
-            pdf.image(img_path, x=10, y=8, w=190)
-
-            # Add invisible text layer
-            pdf.set_font("Arial", size=10)
-            pdf.set_text_color(0, 0, 0, 0)  # Transparent text
-            pdf.multi_cell(0, 5, text)
-
-            # Clean up temp file
-            os.remove(img_path)
-
-        # Return the PDF bytes
-        return pdf.output(dest='S').encode('latin-1')
-
-    except Exception as e:
-        st.error(f"OCR PDF conversion failed: {str(e)}")
-        return None
-
-# ─── OCR PDF Converter UI Function ─────────────────────────────────────────────
-import io
-import os
-import time
-from fpdf import FPDF
-from PIL import Image
-import pytesseract
-from pdf2image import convert_from_bytes
-from PyPDF2 import PdfReader
-import streamlit as st
-
-# ─── OCR PDF Converter UI Function ─────────────────────────────────────────────
-def ocr_pdf_ui(conn):
-    """Convert non-selectable PDFs to searchable PDFs using OCR"""
-    st.header("🔍 OCR PDF Converter")
-    st.markdown("Convert scanned/non-selectable PDFs into searchable PDF documents with text layers.")
-
-    # Settings
-    with st.expander("⚙️ OCR Configuration", expanded=True):
-        col1, col2 = st.columns(2)
-        with col1:
-            ocr_engine = st.radio("OCR Engine", ["Tesseract", "AI Model"], index=0)
-            dpi = st.slider("Scan Resolution (DPI)", 150, 600, 300)
-        with col2:
-            preserve_layout = st.checkbox("Preserve Original Layout", True)
-            language = st.selectbox(
-                "Document Language",
-                ["eng", "fra", "deu", "spa", "por", "chi_sim", "jpn", "kor"]
-            )
-            force_ocr = st.checkbox("Force OCR Processing", False)
-
-    uploaded_file = st.file_uploader("Upload PDF File", type=["pdf"])
-    if not uploaded_file:
-        return
-
-    # If using AI model, load it once
-    ocr_model = None
-    if ocr_engine == "AI Model":
-        with st.spinner("Loading AI OCR model..."):
-            try:
-                ocr_model = load_ocr_model()
-                if ocr_model is None:
-                    raise ValueError("Model load returned None")
-            except Exception as e:
-                st.error(f"Failed to load AI OCR model: {e}")
-                st.info("Falling back to Tesseract engine.")
-                ocr_engine = "Tesseract"
-
-    if st.button("Convert to Searchable PDF"):
-        file_bytes = uploaded_file.read()
-        if not file_bytes.startswith(b"%PDF"):
-            st.error("ⓘ That doesn’t look like a valid PDF.")
-            return
-
-        status = st.empty()
-        # Pre-OCR text check
-        if not force_ocr:
-            try:
-                reader = PdfReader(io.BytesIO(file_bytes))
-                sample_text = "".join(
-                    page.extract_text() or "" for page in reader.pages[:2]
-                )
-                if len(sample_text) > 1000 or (sample_text.count(" ")/len(sample_text) > 0.15):
-                    st.warning(
-                        "This PDF appears to have selectable text. Use ‘Force OCR’ to override."
-                    )
-                    with st.expander("Extracted Text Sample"):
-                        st.code(sample_text[:1000] + "…")
-                    return
-            except Exception:
-                pass  # Proceed to OCR if check fails
-
-        texts = []
-        image_paths = []
-        success_pages = 0
-
-        try:
-            # Convert PDF to images
-            with st.spinner("Converting PDF → images…"):
-                images = convert_from_bytes(
-                    file_bytes,
-                    dpi=dpi,
-                    fmt="jpeg",
-                    thread_count=4,
-                    strict=False
-                )
-                if not images:
-                    raise RuntimeError("No pages found in PDF")
-
-            # OCR each page and save temp images
-            for idx, img in enumerate(images):
-                status.text(f"🔠 OCR page {idx+1}/{len(images)}…")
-                img_path = f"temp_page_{idx}.jpg"
-                img.save(img_path, "JPEG", quality=80)
-                image_paths.append(img_path)
-
-                if ocr_engine == "Tesseract":
-                    page_text = pytesseract.image_to_string(
-                        Image.open(img_path),
-                        lang=language,
-                        config="--oem 3 --psm 6"
-                    )
-                else:
-                    page_text = predict_text_with_model(img, ocr_model) or ""
-
-                texts.append(page_text)
-                success_pages += 1
-
-            # Build searchable PDF
-            pdf = FPDF()
-            pdf.set_auto_page_break(True, 15)
-            pdf.set_creator("PropertyDealsAI OCR Converter")
-
-            for img_path, page_text in zip(image_paths, texts):
-                # Sanitize text to Latin-1 by ignoring unsupported characters
-                safe_text = page_text.encode('latin-1', 'ignore').decode('latin-1')
-
-                pdf.add_page()
-                if preserve_layout:
-                    pdf.image(img_path, x=10, y=8, w=190)
-                pdf.set_font("Arial", size=10)
-                pdf.set_text_color(0, 0, 0)
-                pdf.multi_cell(0, 5, safe_text)
-
-            # Encode final PDF, ignoring any remaining non–Latin-1 chars
-            pdf_bytes = pdf.output(dest='S').encode('latin-1', 'ignore')
-
-        except Exception as e:
-            st.error(f"Conversion failed: {e}")
-            return
-
-        finally:
-            status.empty()
-            # Clean up temp images
-            for path in image_paths:
-                try:
-                    os.remove(path)
-                except OSError:
-                    pass
-
-        # Results & Download
-        st.success(f"✅ Converted {success_pages}/{len(texts)} pages.")
-        with st.expander("📝 OCR Results Preview", expanded=True):
-            tab1, tab2 = st.tabs(["Extracted Text", "First-Page Preview"])
-            with tab1:
-                preview = "\n\n------\n\n".join(texts)
-                st.text(preview[:2000] + ("…" if len(preview) > 2000 else ""))
-            with tab2:
-                st.image(Image.open(image_paths[0]), use_column_width=True)
-
-        st.download_button(
-            "💾 Download Searchable PDF",
-            data=pdf_bytes,
-            file_name=f"searchable_{uploaded_file.name}",
-            mime="application/pdf"
-        )
-
-        save_interaction(
-            conn,
-            "ocr_pdf",
-            f"{uploaded_file.name} → searchable PDF",
-            f"Engine={ocr_engine}, DPI={dpi}, Lang={language}"
-        )
-
 def login_ui(conn):
     """Handle user login with username and password verification"""
     st.title("🔐 Login to Property Deals AI")
@@ -1710,9 +1933,6 @@ def login_ui(conn):
             else:
                 st.error("Invalid username or password.")
 
-
-
-
 def main():
     """Main application function with comprehensive error handling and persistent outputs"""
     # Configure page
@@ -1747,7 +1967,7 @@ def main():
                 background-color: black !important;
                 color: white !important;
             }}
-            /* Placeholder text styling: white */
+            /* Placeholder text styling
             .stTextInput>div>div>input::placeholder,
             .stTextArea>div>div>textarea::placeholder {{
                 color: white !important;
@@ -1816,11 +2036,12 @@ def main():
     features = []
 
     if st.session_state.subscription.get("lease_analysis") or st.session_state.role == "admin":
-        features.append("Lease Summarization")
+        features.append("LeaseBrief Buddy")
     if st.session_state.subscription.get("deal_structuring") or st.session_state.role == "admin":
-        features.append("Deal Structuring")
+        features.append("Auction Buddy")
     if st.session_state.subscription.get("offer_generator") or st.session_state.role == "admin":
-        features.append("Offer Generator")
+        features.append("Offer Buddy")
+
 
     features.append("History")  # History is always available
 
@@ -1831,16 +2052,14 @@ def main():
 
     # Main content
     try:
-        if selected == "Lease Summarization":
+        if selected == "LeaseBrief Buddy":
             lease_summarization_ui(conn)
-        elif selected == "Deal Structuring":
+        elif selected == "Auction Buddy":
             deal_structuring_ui(conn)
-        elif selected == "Offer Generator":
+        elif selected == "Offer Buddy":
             offer_generator_ui(conn)
         elif selected == "History":
             history_ui(conn)
-        elif selected == "OCR PDF":
-            ocr_pdf_ui(conn)
         elif selected == "Admin Portal" and st.session_state.role == "admin":
             admin_portal_ui(conn)
         else:
