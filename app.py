@@ -75,17 +75,17 @@ def init_db(db_path: str = "users.db"):
                 cursor.execute(f"ALTER TABLE users ADD COLUMN {col} TEXT")
             except sqlite3.OperationalError:
                 pass
-    
+
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS subscriptions (
             username TEXT PRIMARY KEY,
-            Lease Summarization BOOLEAN DEFAULT 0,
-            Deal Structuring BOOLEAN DEFAULT 0,
-            Offer Generator BOOLEAN DEFAULT 0,
+            lease_analysis    INTEGER DEFAULT 0,
+            deal_structuring  INTEGER DEFAULT 0,
+            offer_generator   INTEGER DEFAULT 0,
             FOREIGN KEY(username) REFERENCES users(username)
         )
     """)
-    
+
     cursor.execute(
         """
         CREATE TABLE IF NOT EXISTS interactions (
@@ -230,17 +230,17 @@ def save_interaction(conn, feature: str, input_text: str, output_text: str):
         conn.commit()
 
 def lease_summarization_ui(conn):
-    """Lease Summarization: upload PDF and get either full-document or page-by-page summaries with model selection, persisting results for chatbot usage. Allows uploading a Word document with questions based on the summary and answering them."""
+    """Lease Summarization: upload PDF and get either full-document or page-by-page summaries with model selection, persisting results for chatbot usage. Allows uploading a Word document with any content based on the summary and generates relevant output."""
     st.header("📄 Lease Summary")
-    # Clear previous summary
+    # Clear previous summary and related data
     if st.button("Clear Summary", key="clear_lease_summary"):
-        for k in ['last_file', 'last_summary', 'last_mode', 'last_engine', 'last_questions', 'last_answers']:
+        for k in ['last_file', 'last_summary', 'last_mode', 'last_engine', 'last_docx_content', 'last_docx_output']:
             st.session_state.pop(k, None)
-        st.success("Cleared previous summary and Q&A.")
+        st.success("Cleared previous summary and related content.")
         st.rerun()
 
     st.markdown(
-        "Upload your lease PDF and receive a concise summary—choose to process the entire document at once or summarize each page individually."
+        "Upload your lease PDF and get a **fast** and concise summary—either the full document at once or page by page."
     )
 
     uploaded_file = st.file_uploader(
@@ -248,7 +248,7 @@ def lease_summarization_ui(conn):
     )
     if 'last_file' in st.session_state and uploaded_file:
         if st.session_state.last_file != uploaded_file.name:
-            for k in ['last_summary', 'last_mode', 'last_engine', 'last_questions', 'last_answers']:
+            for k in ['last_summary', 'last_mode', 'last_engine', 'last_docx_content', 'last_docx_output']:
                 st.session_state.pop(k, None)
 
     if not uploaded_file:
@@ -348,47 +348,48 @@ def lease_summarization_ui(conn):
             key="lease_export_word"
         )
 
-        # Question Upload and Answering Section
+        # Document Upload and Processing Section
         st.divider()
-        st.markdown("### ❓ Question Answering")
-        st.markdown("Upload a Word document (.docx) containing questions about the lease summary to get AI-generated answers.")
+        st.markdown("### 📝 Process Additional Document")
+        st.markdown("Upload a Word document (.docx) with any content related to the lease summary (e.g., comments, instructions, or additional details) to get an AI-generated response.")
 
-        question_file = st.file_uploader(
-            "Upload Questions (Word Document)", type=["docx"], key="lease_questions_uploader"
+        docx_file = st.file_uploader(
+            "Upload Document (Word Document)", type=["docx"], key="lease_docx_uploader"
         )
 
-        if question_file:
+        if docx_file:
             try:
-                doc = docx.Document(question_file)
-                questions = [para.text.strip() for para in doc.paragraphs if para.text.strip()]
-                questions = [q for q in questions if q.endswith('?')]  # Filter for questions only
-                if not questions:
-                    st.error("No valid questions found in the document. Ensure questions end with '?'.")
+                doc = docx.Document(docx_file)
+                docx_content = "\n".join([para.text.strip() for para in doc.paragraphs if para.text.strip()])
+                if not docx_content:
+                    st.error("No valid content found in the document.")
                 else:
-                    st.session_state['last_questions'] = questions
-                    st.success(f"Found {len(questions)} questions in the document.")
+                    st.session_state['last_docx_content'] = docx_content
+                    # st.success(f"Document uploaded successfully. Content length: {len(docx_content)} characters.")
+                    # with st.expander("Document Content Preview"):
+                    #     st.write(docx_content[:1000] + ("…" if len(docx_content) > 1000 else ""))
             except Exception as e:
                 st.error(f"Failed to process Word document: {e}")
                 return
 
-        # Display existing Q&A if available
-        if 'last_questions' in st.session_state and 'last_answers' in st.session_state and st.session_state.get('last_file') == uploaded_file.name:
-            st.subheader("Questions and Answers")
-            for idx, (question, answer) in enumerate(zip(st.session_state['last_questions'], st.session_state['last_answers']), start=1):
-                with st.expander(f"Question {idx}: {question}"):
-                    st.markdown(f"**Answer ({engine}):**")
-                    st.write(answer)
+        # Display existing processed content and output if available
+        if 'last_docx_content' in st.session_state and 'last_docx_output' in st.session_state and st.session_state.get('last_file') == uploaded_file.name:
+            # st.subheader("Uploaded Document and AI Response")
+            # with st.expander("Uploaded Document Content"):
+            #     st.write(st.session_state['last_docx_content'])
+            with st.expander(f"AI Response ({engine})"):
+                st.write(st.session_state['last_docx_output'])
             st.divider()
 
-            # Export Q&A
-            st.markdown("### 📥 Export Q&A")
-            qa_file_name = st.text_input("Q&A Filename (no extension):", value=f"{file_base}_qa", key="lease_qa_export_name")
+            # Export Processed Output
+            st.markdown("### 📥 Export Processed Output")
+            output_file_name = st.text_input("Output Filename (no extension):", value=f"{file_base}_processed", key="lease_output_export_name")
 
-            # PDF Export for Q&A
-            class QAPDF(FPDF):
+            # PDF Export for Processed Output
+            class OutputPDF(FPDF):
                 def header(self):
                     self.set_font('Arial', 'B', 16)
-                    self.cell(0, 10, 'Lease Summary Q&A', ln=True, align='C')
+                    self.cell(0, 10, 'Lease Summary Processed Output', ln=True, align='C')
                     self.set_font('Arial', '', 12)
                     self.cell(0, 8, f"Mode: {mode} | Engine: {engine}", ln=True, align='C')
                     self.ln(5)
@@ -397,81 +398,67 @@ def lease_summarization_ui(conn):
                     self.set_font('Arial', 'I', 8)
                     self.cell(0, 10, f"Page {self.page_no()}/{{nb}}", align='C')
 
-            qa_pdf = QAPDF()
-            qa_pdf.alias_nb_pages()
-            qa_pdf.add_page()
-            qa_pdf.set_font("Arial", '', 12)
-            for idx, (q, a) in enumerate(zip(st.session_state['last_questions'], st.session_state['last_answers']), start=1):
-                qa_pdf.set_font("Arial", 'B', 12)
-                qa_pdf.multi_cell(0, 6, f"Question {idx}: {q.encode('latin-1', 'replace').decode('latin-1')}")
-                qa_pdf.ln(2)
-                qa_pdf.set_font("Arial", '', 12)
-                qa_pdf.multi_cell(0, 6, a.encode('latin-1', 'replace').decode('latin-1'))
-                qa_pdf.ln(4)
-            qa_pdf_bytes = qa_pdf.output(dest='S')
+            output_pdf = OutputPDF()
+            output_pdf.alias_nb_pages()
+            output_pdf.add_page()
+            output_pdf.set_font("Arial", '', 12)
+            output_pdf.multi_cell(0, 6, f"Uploaded Document Content:\n{st.session_state['last_docx_content'].encode('latin-1', 'replace').decode('latin-1')}")
+            output_pdf.ln(4)
+            output_pdf.multi_cell(0, 6, f"AI Response:\n{st.session_state['last_docx_output'].encode('latin-1', 'replace').decode('latin-1')}")
+            output_pdf_bytes = output_pdf.output(dest='S')
             st.download_button(
-                "Download Q&A PDF",
-                data=qa_pdf_bytes,
-                file_name=f"{qa_file_name}.pdf",
+                "Download Processed Output PDF",
+                data=output_pdf_bytes,
+                file_name=f"{output_file_name}.pdf",
                 mime="application/pdf",
-                key="lease_qa_export_pdf"
+                key="lease_output_export_pdf"
             )
 
-            # Word Export for Q&A
-            qa_doc = docx.Document()
-            qa_style = qa_doc.styles['Normal']
-            qa_style.font.name = 'Arial'
-            qa_style.font.size = Pt(12)
-            qa_doc.add_heading('Lease Summary Q&A', level=1)
-            qa_doc.add_paragraph(f"Mode: {mode} | Engine: {engine}")
-            qa_doc.add_paragraph("")
-            for idx, (q, a) in enumerate(zip(st.session_state['last_questions'], st.session_state['last_answers']), start=1):
-                qa_doc.add_heading(f"Question {idx}: {q}", level=2)
-                qa_doc.add_paragraph(a)
-            qa_buf = io.BytesIO()
-            qa_doc.save(qa_buf)
+            # Word Export for Processed Output
+            output_doc = docx.Document()
+            output_style = output_doc.styles['Normal']
+            output_style.font.name = 'Arial'
+            output_style.font.size = Pt(12)
+            output_doc.add_heading('Lease Summary Processed Output', level=1)
+            output_doc.add_paragraph(f"Mode: {mode} | Engine: {engine}")
+            output_doc.add_paragraph("")
+            output_doc.add_heading("Uploaded Document Content", level=2)
+            output_doc.add_paragraph(st.session_state['last_docx_content'])
+            output_doc.add_heading("AI Response", level=2)
+            output_doc.add_paragraph(st.session_state['last_docx_output'])
+            output_buf = io.BytesIO()
+            output_doc.save(output_buf)
             st.download_button(
-                "Download Q&A Word",
-                data=qa_buf.getvalue(),
-                file_name=f"{qa_file_name}.docx",
+                "Download Processed Output Word",
+                data=output_buf.getvalue(),
+                file_name=f"{output_file_name}.docx",
                 mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-                key="lease_qa_export_word"
+                key="lease_output_export_word"
             )
 
-        # Generate answers if questions are uploaded and no answers exist
-        if question_file and 'last_questions' in st.session_state and 'last_answers' not in st.session_state:
-            if st.button("Generate Answers", key="lease_generate_answers"):
-                answers = []
-                for idx, question in enumerate(st.session_state['last_questions'], start=1):
-                    with st.spinner(f"Answering question {idx}..."):
-                        prompt = f"Lease Summary:\n{summary_content}\n\nQuestion: {question}"
-                        if ai_engine == "DeepSeek":
-                            response = call_deepseek(
-                                messages=[
-                                    {"role": "system", "content": "You are a real estate expert answering questions based on a lease summary."},
-                                    {"role": "user", "content": prompt}
-                                ],
-                                model="deepseek-chat",
-                                temperature=0.3,
-                                max_tokens=512
-                            )
-                        elif ai_engine == "Gemini Pro":
-                            response = call_gemini(feature="lease_questions", content=prompt, temperature=0.3)
-                        else:
-                            response = call_mistral(
-                                messages=[
-                                    {"role": "system", "content": "You are a real estate expert answering questions based on a lease summary."},
-                                    {"role": "user", "content": prompt}
-                                ],
-                                temperature=0.3,
-                                max_tokens=512
-                            )
-                        answers.append(response)
-                st.session_state['last_answers'] = answers
-                save_interaction(conn, "lease_questions", json.dumps(st.session_state['last_questions']), json.dumps(answers))
-                st.rerun()
+        # Generate output if needed
+        if docx_file and 'last_docx_content' in st.session_state and 'last_docx_output' not in st.session_state:
+            if st.button("Generate Response", key="lease_generate_response"):
+                with st.spinner("Generating response based on uploaded document…"):
+                    prompt = (
+                        f"Lease Summary:\n{summary_content}\n\n"
+                        f"Uploaded Document Content:\n{st.session_state['last_docx_content']}\n\n"
+                        "Analyze the uploaded document content and generate a relevant response based on the lease summary. "
+                        "The content may include comments, instructions, or additional details. Provide a clear and appropriate response, such as further analysis, clarifications, or commentary, as needed."
+                    )
+                    response = call_mistral(
+                        messages=[
+                            {"role": "system", "content": "You are a real estate expert processing additional content related to a lease summary."},
+                            {"role": "user", "content": prompt}
+                        ],
+                        temperature=0.3,
+                        max_tokens=1024
+                    )
+                    st.session_state['last_docx_output'] = response
+                    save_interaction(conn, "lease_docx_processing", st.session_state['last_docx_content'], response)
+                    st.rerun()
 
-    # Generate new summary
+    # If no existing summary, generate a new one
     if st.button("Generate Summary", key="lease_generate_button"):
         try:
             reader = PdfReader(uploaded_file)
@@ -490,7 +477,7 @@ def lease_summarization_ui(conn):
 
         if summary_mode == "Full Document":
             text = "\n".join(pages)
-            with st.spinner("Summarizing full document..."):
+            with st.spinner("Quickly summarizing full document..."):
                 summaries = []
                 chunks = [text[i:i+15000] for i in range(0, len(text), 15000)] if len(text) > 15000 else [text]
                 for chunk in chunks:
@@ -498,17 +485,17 @@ def lease_summarization_ui(conn):
                         "Summarize this portion of the lease agreement in clear, concise language, "
                         "preserving all key details:\n\n" + chunk
                     )
-                    if ai_engine == "DeepSeek":
-                        summaries.append(call_deepseek(messages=[{"role":"user","content":prompt}], model="deepseek-chat", temperature=0.3, max_tokens=1024))
-                    elif ai_engine == "Gemini Pro":
-                        summaries.append(call_gemini(feature="lease_analysis", content=prompt, temperature=0.3))
-                    else:
-                        summaries.append(call_mistral(messages=[{"role":"user","content":prompt}], temperature=0.3, max_tokens=1024))
+                    summaries.append(call_mistral(
+                        messages=[{"role": "user", "content": prompt}],
+                        temperature=0.3,
+                        max_tokens=1024
+                    ))
                 final = "\n\n".join(summaries)
             st.subheader("Full Document Summary")
             st.write(final)
             save_interaction(conn, "lease_summary_full", uploaded_file.name, final)
             st.session_state['last_summary'] = final
+
         else:
             parts = []
             st.subheader("Page-by-Page Summaries")
@@ -517,21 +504,21 @@ def lease_summarization_ui(conn):
                     parts.append("(no text detected)")
                     st.markdown(f"**Page {i}:** _(no text detected)_")
                 else:
-                    with st.spinner(f"Summarizing page {i}..."):
+                    with st.spinner(f"Fast summary for page {i}…"):
                         prompt = (
                             f"Summarize page {i} of this lease agreement in clear, concise language, covering all information:\n\n{pg}"
                         )
-                        if ai_engine == "DeepSeek":
-                            summary = call_deepseek(messages=[{"role":"user","content":prompt}], model="deepseek-chat", temperature=0.3, max_tokens=512)
-                        elif ai_engine == "Gemini Pro":
-                            summary = call_gemini(feature="lease_analysis", content=prompt, temperature=0.3)
-                        else:
-                            summary = call_mistral(messages=[{"role":"user","content":prompt}], temperature=0.3, max_tokens=512)
+                        summary = call_mistral(
+                            messages=[{"role": "user", "content": prompt}],
+                            temperature=0.3,
+                            max_tokens=512
+                        )
                         st.markdown(f"**Page {i} Summary:**")
                         st.write(summary)
                         parts.append(summary)
             save_interaction(conn, "lease_summary_pagewise", uploaded_file.name, json.dumps({f"page_{i}": pages[i-1] for i in range(1, len(pages)+1)}))
             st.session_state['last_summary'] = parts
+
         st.rerun()
 
 def deal_structuring_ui(conn):
