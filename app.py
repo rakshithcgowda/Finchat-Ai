@@ -57,155 +57,113 @@ mistral_client = Mistral(api_key=MISTRAL_API_KEY)
 
 # ─── OCR.space API Functions ───────────────────────────────────────────────────
 OCR_ENDPOINTS = [
-    "https://apipro1.ocr.space/parse/image",
-    "https://apipro2.ocr.space/parse/image",
+    "https://apipro1.ocr.space",
+    "https://apipro2.ocr.space",
 ]
 
 def ocr_space_file_pro(
     filename: str,
-    api_key: str = "PDF8V7778Y0TX",
+    api_key: str = OCR_API_KEY,
     language: str = "eng",
     overlay: bool = False,
-    retries: int = 2,
-    timeout: int = 60
+    engine: int = 2,
+    create_searchable_pdf: bool = True,
+    hide_text_layer: bool = True,
+    retries: int = 3,
+    timeout: int = 120,
 ) -> dict:
     """
-    Send a PDF or image to OCR.space PRO, with automatic datacenter fail-over.
-    Returns the full JSON response from whichever endpoint succeeds.
+    Send a PDF or image to OCR.space PRO endpoint.
+    Tries each datacenter endpoint in turn, with exponential backoff.
     """
-    if not os.path.exists(filename):
-        raise FileNotFoundError(f"File not found: {filename}")
-
-    # Determine MIME and filetype from extension
-    ext = os.path.splitext(filename)[1].lower()
-    if ext == ".pdf":
-        filetype, mimetype = "PDF", "application/pdf"
-    elif ext in (".jpg", ".jpeg"):
-        filetype, mimetype = "JPG", "image/jpeg"
-    elif ext == ".png":
-        filetype, mimetype = "PNG", "image/png"
-    else:
-        filetype, mimetype = None, "application/octet-stream"
+    mimetype = {
+        ".pdf": "application/pdf",
+        ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
+        ".png": "image/png"
+    }.get(os.path.splitext(filename)[1].lower(), "application/octet-stream")
 
     payload = {
         "apikey": api_key,
         "language": language,
         "isOverlayRequired": overlay,
-        "detectOrientation": True,
         "scale": True,
-        "isTable": True,
-        "OCREngine": 2,
+        "OCREngine": engine,
+        "isCreateSearchablePdf": create_searchable_pdf,
+        "isSearchablePdfHideTextLayer": hide_text_layer,
     }
-    if filetype:
-        payload["filetype"] = filetype
 
-    last_error = None
-    # Try each endpoint in order
+    last_err = None
     for endpoint in OCR_ENDPOINTS:
         for attempt in range(1, retries + 1):
             try:
                 with open(filename, "rb") as f:
-                    files = {
-                        "file": (os.path.basename(filename), f, mimetype)
-                    }
+                    files = {"file": (os.path.basename(filename), f, mimetype)}
                     resp = requests.post(
-                        endpoint,
+                        endpoint + "/parse/image",
                         data=payload,
                         files=files,
                         timeout=timeout
                     )
                 resp.raise_for_status()
                 result = resp.json()
-
-                # If the OCR engine itself reports an error
                 if result.get("IsErroredOnProcessing"):
-                    msg = result.get("ErrorMessage") or result.get("ErrorDetails") or "Unknown OCR error"
-                    raise RuntimeError(f"OCR API error: {msg}")
-
-                # Success! Return the JSON
+                    raise RuntimeError(result.get("ErrorMessage") or "OCR processing error")
                 return result
-
             except Exception as e:
-                last_error = e
-                # on last retry for this endpoint, break out to try the next DC
-                if attempt == retries:
-                    break
-                time.sleep(2 ** attempt)
-
-    # If we get here, all endpoints & retries failed
-    raise RuntimeError(f"All OCR.space PRO endpoints failed: {last_error}")
+                last_err = e
+                sleep = 2 ** attempt
+                time.sleep(sleep)
+        # if this endpoint failed all retries, move to the next
+    raise RuntimeError(f"All OCR endpoints failed: {last_err}")
 
 
 
-def ocr_space_url(url, overlay=False, api_key='PDF8V7778Y0TX', language='eng', retries=3, timeout=60):
-    """Enhanced OCR.space GET API request with remote image URL.
-    Features:
-    - URL validation
-    - Smart retry with exponential backoff
-    - Image type detection
-    - Quality control
+
+def ocr_space_url(
+    url: str,
+    api_key: str = OCR_API_KEY,
+    language: str = "eng",
+    overlay: bool = False,
+    engine: int = 2,
+    retries: int = 3,
+    timeout: int = 60,
+) -> dict:
     """
-    # Validate URL format
-    if not re.match(r'^https?://', url, re.I):
-        raise ValueError("Invalid URL format")
-    
+    Send an image URL to OCR.space PRO endpoint.
+    Rotates through endpoints if necessary.
+    """
+    if not url.lower().startswith(("http://", "https://")):
+        raise ValueError("URL must start with http:// or https://")
+
     params = {
-        'apikey': api_key,
-        'url': url,
-        'language': language,
-        'isOverlayRequired': overlay,
-        'detectOrientation': True,
-        'scale': True,
-        'OCREngine': 2  # Advanced engine
+        "apikey": api_key,
+        "url": url,
+        "language": language,
+        "isOverlayRequired": overlay,
+        "detectOrientation": True,
+        "scale": True,
+        "OCREngine": engine
     }
-    
-    for attempt in range(retries):
-        try:
-            with st.spinner(f"Processing remote image (Attempt {attempt + 1}/{retries})..."):
-                url_endpoint = OCR_ENDPOINTS[0].replace("/parse/image", "/parse/imageurl")
-                r = requests.post(
-                    url_endpoint,
-                    data=params,
+
+    last_err = None
+    for endpoint in OCR_ENDPOINTS:
+        for attempt in range(1, retries + 1):
+            try:
+                resp = requests.get(
+                    endpoint + "/parse/imageurl",
+                    params=params,
                     timeout=timeout
                 )
-            r.raise_for_status()
-            
-            result = json.loads(r.content.decode())
-            
-            # Check OCR quality metrics
-            if result.get('OCRExitCode') not in [1, 2]:
-                error_msg = result.get('ErrorMessage', 'Unknown OCR error')
-                if attempt == retries - 1:
-                    raise Exception(f"OCR failed: {error_msg}")
-                time.sleep(2 ** attempt)  # Exponential backoff
-                continue
-                
-            # Validate parsed results
-            parsed_results = result.get('ParsedResults', [])
-            if not parsed_results:
-                if attempt == retries - 1:
-                    raise Exception("No OCR results returned")
-                continue
-                
-            # Check text confidence
-            first_result = parsed_results[0]
-            if 'ParsedText' not in first_result:
-                if attempt == retries - 1:
-                    raise Exception("No parsed text in OCR results")
-                continue
-                
-            return r.content.decode()
-            
-        except requests.exceptions.RequestException as e:
-            if attempt == retries - 1:
-                raise Exception(f"OCR API request failed after {retries} attempts: {str(e)}")
-            time.sleep(2 ** attempt)
-        except json.JSONDecodeError:
-            if attempt == retries - 1:
-                raise Exception("Invalid JSON response from OCR API")
-            time.sleep(1)
-    
-    return ""
+                resp.raise_for_status()
+                result = resp.json()
+                if result.get("IsErroredOnProcessing"):
+                    raise RuntimeError(result.get("ErrorMessage") or "OCR processing error")
+                return result
+            except Exception as e:
+                last_err = e
+                time.sleep(2 ** attempt)
+        # try next endpoint
+    raise RuntimeError(f"All OCR endpoints failed: {last_err}")
 
 
 # ─── Database Helpers ──────────────────────────────────────────────────────────
@@ -406,15 +364,15 @@ def preprocess_image_for_ocr(img):
         # Convert to grayscale
         if img.mode != 'L':
             img = img.convert('L')
-        
+
         # Enhance contrast
         from PIL import ImageEnhance
         enhancer = ImageEnhance.Contrast(img)
         img = enhancer.enhance(2.0)
-        
+
         # Remove noise
         img = img.point(lambda x: 0 if x < 128 else 255, '1')
-        
+
         return img
     except Exception as e:
         st.warning(f"Image preprocessing failed: {e}")
@@ -426,162 +384,147 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(
 
 def extract_text_with_ocr(uploaded_file=None, file_type: str = "pdf", url: str = None):
     """Enhanced text extraction with OCR.space API for PDFs and images.
-    Features:
-    - Handles PDFs with selectable text, image-based text, or both
-    - Optimized for OCR.space API (https://ocr.space/OCRAPI)
-    - Merges direct text and OCR results
+    - Direct per-page extraction with fallback to per-page OCR
+    - Merges direct and OCR results to maintain page order
     - Detailed logging for debugging
-    - Progress tracking and robust error handling
     """
     def validate_extracted_text(text: str) -> bool:
-        """Check if extracted text is meaningful"""
         text = text.strip()
-        if not text:
-            return False
-        if len(text) < 30 or len(text.split()) < 5:  # Relaxed thresholds for robustness
-            return False
-        return True
+        return bool(text) and len(text.split()) >= 2
 
     def clean_text(text: str) -> str:
-        """Clean extracted text by normalizing spaces and removing control characters"""
-        text = re.sub(r'\s+', ' ', text)  # Normalize spaces
-        text = re.sub(r'[^\x20-\x7E\n]', '', text)  # Remove non-printable characters
+        text = re.sub(r'\s+', ' ', text)
+        text = re.sub(r'[^\x20-\x7E\n]', '', text)
         return text.strip()
 
     try:
         pages_text = []
         used_ocr = False
-        logging.info(f"Starting text extraction for file_type={file_type}, url={url}")
 
-        # Handle remote URL case (JPG only)
-        if url and not uploaded_file:
-            if not url.lower().endswith(('.jpg', '.jpeg')):
-                st.error("Please provide a valid JPG URL.")
-                logging.error(f"Invalid URL format: {url}")
-                return []
-            st.info("Processing remote JPG with OCR.space API...")
-            logging.info(f"Processing URL: {url}")
-            response = ocr_space_url(
-                url=url,
-                overlay=False,
-                api_key=OCR_API_KEY,
-                language='eng',
-                retries=3,
-                timeout=60
-            )
-            try:
-                result = json.loads(response)
-                if result.get("OCRExitCode") in [1, 2]:
-                    parsed_text = result.get("ParsedResults", [{}])[0].get("ParsedText", "")
-                    cleaned_text = clean_text(parsed_text)
-                    if validate_extracted_text(cleaned_text):
-                        pages_text.append(cleaned_text)
-                        logging.info(f"Successfully extracted text from URL: {len(cleaned_text)} chars")
-                    else:
-                        st.warning("Low-quality text from URL. Attempting file-based OCR...")
-                        logging.warning(f"Low-quality text from URL: {cleaned_text[:100]}")
-                        # Fallback to downloading and processing
-                        img_response = requests.get(url, timeout=30)
-                        img_response.raise_for_status()
-                        with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as temp_file:
-                            temp_file.write(img_response.content)
-                            temp_file_path = temp_file.name
-                        response = ocr_space_file_pro(
-                            filename=temp_file_path,
-                            api_key=OCR_API_KEY,
-                            language='eng'
-                        )
-                        parsed_text = response.get("ParsedResults", [{}])[0].get("ParsedText", "")
-                        cleaned_text = clean_text(parsed_text)
-                        pages_text.append(cleaned_text)
-                        used_ocr = True
-                        os.unlink(temp_file_path)
-                        logging.info(f"Fallback OCR completed: {len(cleaned_text)} chars")
+        # Handle uploaded file case
+        if uploaded_file and file_type.lower() == "pdf":
+            reader = PdfReader(uploaded_file)
+            # ── Try direct per-page extraction ─────────────────────────
+            for i, page in enumerate(reader.pages):
+                raw = page.extract_text() or ""
+                cleaned = clean_text(raw)
+                if validate_extracted_text(cleaned):
+                    pages_text.append(cleaned)
                 else:
-                    error_msg = result.get("ErrorMessage", "Unknown error")
-                    st.error(f"OCR failed for URL: {error_msg}")
-                    logging.error(f"OCR failed for URL: {error_msg}")
-                    pages_text.append("")
-            except json.JSONDecodeError as e:
-                st.error("Invalid OCR response from URL.")
-                logging.error(f"JSON decode error: {str(e)}")
-                pages_text.append("")
+                    logging.info(f"Page {i+1} empty; falling back to per-page OCR.")
+                    # Create single-page PDF
+                    from PyPDF2 import PdfWriter
+                    writer = PdfWriter()
+                    writer.add_page(page)
+                    with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as onepagetmp:
+                        writer.write(onepagetmp)
+                        tmp_pdf = onepagetmp.name
+
+                    # Convert to image
+                    images = convert_pdf_to_images(tmp_pdf, tempfile.gettempdir(), dpi=300)
+                    os.unlink(tmp_pdf)
+
+                    # OCR the first image
+                    page_text = ""
+                    if images:
+                        img = Image.open(images[0])
+                        img = preprocess_image_for_ocr(img)
+                        with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as imgf:
+                            img.save(imgf.name, "PNG", quality=100)
+                            resp = ocr_space_file_pro(
+                                filename=imgf.name,
+                                api_key=OCR_API_KEY,
+                                language='eng',
+                                retries=2,
+                                timeout=60
+                            )
+                        os.unlink(imgf.name)
+                        page_text = clean_text(
+                            resp.get("ParsedResults", [{}])[0].get("ParsedText", "")
+                        )
+                        used_ocr = True
+                    pages_text.append(page_text)
+
+                    # Clean up intermediate images
+                    for img_path in images:
+                        try:
+                            os.unlink(img_path)
+                        except:
+                            pass
+
             return pages_text
 
         # Handle uploaded file case
+        # Handle uploaded file
         if uploaded_file:
-            # PDF processing
-            if file_type == "pdf":
-                with tempfile.TemporaryDirectory() as temp_dir:
-                    # Direct text extraction
+            if file_type.lower() == "pdf":
+                # 1. Try direct text extraction first
+                try:
+                    reader = PdfReader(uploaded_file)
+                    direct_pages = [clean_text(p.extract_text() or "") for p in reader.pages]
+                except Exception as e:
+                    logging.warning(f"Direct PDF extraction failed: {e}")
                     direct_pages = []
-                    try:
-                        with pdfplumber.open(uploaded_file) as pdf:
-                            num_pages = len(pdf.pages)
-                            logging.info(f"PDF has {num_pages} pages")
-                            for i, page in enumerate(pdf.pages):
-                                text = page.extract_text() or ""
-                                cleaned_text = clean_text(text)
-                                direct_pages.append(cleaned_text)
-                                logging.info(f"Direct extraction page {i+1}: {len(cleaned_text)} chars")
-                    except Exception as e:
-                        st.warning(f"Direct text extraction failed: {e}")
-                        logging.error(f"Direct extraction error: {str(e)}")
+                    # ————— Updated boilerplate detection —————
+                    bp_phrase = "incomplete without the preceding notes"
+                    bp_count = sum(1 for p in direct_pages if bp_phrase in p.lower())
+                    if bp_count >= 0.8 * len(direct_pages):
+                        logging.info(f"Detected {bp_count}/{len(direct_pages)} boilerplate pages; forcing OCR.")
                         direct_pages = []
+                    # ————————————————————————————————
 
-                    # Convert PDF to images for OCR
+                # ————————— Patch starts here —————————
+                unique_pages = set(direct_pages)
+                if len(unique_pages) == 1 and 'official copy' in next(iter(unique_pages)).lower():
+                    logging.info("Detected boilerplate repetition; forcing OCR extraction.")
+                    direct_pages = []
+                # ————————— Patch ends here —————————
+
+                # 2. If any page has real text, trust direct extraction
+                if any(len(p.split()) >= 2 for p in direct_pages):
+                    logging.info("Using direct PDF text extraction, skipping OCR.")
+                    return direct_pages
+
+                # 3. Otherwise fall back to image-based OCR
+                with tempfile.TemporaryDirectory() as temp_dir:
                     uploaded_file.seek(0)
                     images = convert_pdf_to_images(uploaded_file, temp_dir, dpi=300)
                     if not images:
-                        st.error("Failed to convert PDF to images for OCR.")
-                        logging.error("No images generated from PDF")
+                        logging.error("Failed to convert PDF to images for OCR.")
                         return []
 
-                    ocr_pages = []
                     progress = st.progress(0)
+                    ocr_pages = []
                     for i, img_path in enumerate(images):
                         try:
-                            # Preprocess image
                             img = Image.open(img_path)
                             img = preprocess_image_for_ocr(img)
-                            with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as temp_img:
-                                img.save(temp_img.name, "PNG", quality=100)
-                                logging.info(f"Processing image for page {i+1}: {temp_img.name}")
-                                response = ocr_space_file_pro(
-                                    filename=temp_img.name,
+                            with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmpf:
+                                img.save(tmpf.name, "PNG", quality=100)
+                                resp = ocr_space_file_pro(
+                                    filename=tmpf.name,
                                     api_key=OCR_API_KEY,
                                     language='eng',
                                     retries=2,
                                     timeout=60
                                 )
-                            parsed_text = response.get("ParsedResults", [{}])[0].get("ParsedText", "")
-                            cleaned_text = clean_text(parsed_text)
-                            ocr_pages.append(cleaned_text)
+                            parsed = resp.get("ParsedResults", [{}])[0].get("ParsedText", "")
+                            ocr_pages.append(clean_text(parsed))
                             used_ocr = True
-                            os.unlink(temp_img.name)
-                            logging.info(f"OCR page {i+1}: {len(cleaned_text)} chars")
+                            os.unlink(tmpf.name)
                         except Exception as e:
-                            st.warning(f"OCR failed for page {i+1}: {e}")
-                            logging.error(f"OCR error page {i+1}: {str(e)}")
+                            logging.error(f"OCR failed for page {i+1}: {e}")
                             ocr_pages.append("")
                         progress.progress((i + 1) / len(images))
 
-                    # Merge direct and OCR results
-                    for i, (direct_text, ocr_text) in enumerate(zip(direct_pages, ocr_pages)):
-                        if validate_extracted_text(direct_text) and not validate_extracted_text(ocr_text):
-                            pages_text.append(direct_text)
-                            logging.info(f"Page {i+1}: Used direct text ({len(direct_text)} chars)")
-                        elif validate_extracted_text(ocr_text):
-                            pages_text.append(ocr_text)
-                            logging.info(f"Page {i+1}: Used OCR text ({len(ocr_text)} chars)")
+                    # 4. Merge direct vs OCR
+                    for direct, ocr in zip(direct_pages, ocr_pages):
+                        if validate_extracted_text(direct):
+                            pages_text.append(direct)
+                        elif validate_extracted_text(ocr):
+                            pages_text.append(ocr)
                         else:
-                            combined = clean_text(direct_text + " " + ocr_text)
-                            if validate_extracted_text(combined):
-                                pages_text.append(combined)
-                                logging.info(f"Page {i+1}: Used combined text ({len(combined)} chars)")
-                            else:
-                                pages_text.append("")
-                                logging.warning(f"Page {i+1}: No meaningful text extracted")
+                            pages_text.append(clean_text(direct + " " + ocr))
 
             # Image processing (JPG)
             else:
@@ -613,7 +556,7 @@ def extract_text_with_ocr(uploaded_file=None, file_type: str = "pdf", url: str =
 
         # Validate final results
         if not any(validate_extracted_text(p) for p in pages_text):
-            st.error("Failed to extract meaningful text from the document. Check file quality or try a different format.")
+            st.error("Failed to extract meaningful text from the document.")
             logging.error("No meaningful text extracted from document")
             return []
 
@@ -622,15 +565,14 @@ def extract_text_with_ocr(uploaded_file=None, file_type: str = "pdf", url: str =
         return pages_text
 
     except Exception as e:
-        st.error(f"Text extraction failed: {str(e)}")
-        logging.error(f"Extraction failed: {str(e)}", exc_info=True)
+        logging.error(f"extract_text_with_ocr failed: {e}", exc_info=True)
         return []
 
 
 def lease_summarization_ui(conn):
     """Lease Summarization: upload PDF or JPG, or provide a JPG URL, and get either full-document or page-by-page summaries with model selection, persisting results for chatbot usage. Allows uploading a Word document with any content based on the summary and generates relevant output. Handles non-searchable PDFs and JPG images using OCR and displays extracted text via dropdown."""
     st.header("📄 Lease Summary")
-    
+
     # Clear previous summary and related data
     if st.button("Clear Summary", key="clear_lease_summary"):
         for k in ['last_file', 'last_url', 'last_summary', 'last_mode', 'last_engine', 'last_docx_content', 'last_docx_output', 'extracted_pages', 'used_ocr', 'last_selected_page_index']:
@@ -646,7 +588,7 @@ def lease_summarization_ui(conn):
     uploaded_file = st.file_uploader(
         "Upload Lease Document (PDF or JPG)", type=["pdf", "jpg", "jpeg"], key="lease_file_uploader"
     )
-    
+
     # URL input for remote JPG
     image_url = st.text_input("Or Enter Public JPG URL", key="lease_image_url", placeholder="e.g., https://example.com/image.jpg")
 
