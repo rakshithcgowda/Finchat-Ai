@@ -570,7 +570,7 @@ def extract_text_with_ocr(uploaded_file=None, file_type: str = "pdf", url: str =
 
 
 def lease_summarization_ui(conn):
-    """Lease Summarization: upload PDF or JPG, or provide a JPG URL, and get either full-document or page-by-page summaries with model selection, persisting results for chatbot usage. Allows uploading a Word document with any content based on the summary and generates relevant output. Handles non-searchable PDFs and JPG images using OCR and displays extracted text via dropdown."""
+    """Lease Summarization: upload PDF or JPG, or provide a JPG URL, and get either full-document or page-by-page summaries after OCR extraction. Allows uploading a Word document with any content based on the summary and generates relevant output."""
     st.header("📄 Lease Summary")
 
     # Clear previous summary and related data
@@ -581,7 +581,7 @@ def lease_summarization_ui(conn):
         st.rerun()
 
     st.markdown(
-        "Upload your lease PDF or JPG image, or provide a public JPG URL, and get a **fast** and concise summary—either the full document at once or page by page. Non-searchable PDFs and JPG images will be processed using OCR. View extracted text before summarization."
+        "Upload your lease PDF or JPG image, or provide a public JPG URL. Text will be extracted using OCR on a page-by-page basis. After extraction, choose to summarize the full document or page by page."
     )
 
     # File uploader for PDF or JPG
@@ -615,6 +615,7 @@ def lease_summarization_ui(conn):
         for k in ['last_summary', 'last_mode', 'last_engine', 'last_docx_content', 'last_docx_output', 'extracted_pages', 'used_ocr', 'last_selected_page_index', 'last_file']:
             st.session_state.pop(k, None)
 
+    # AI engine selection
     ai_engine = st.radio(
         "Select AI Model",
         ["in-depth"],
@@ -622,55 +623,20 @@ def lease_summarization_ui(conn):
         horizontal=True,
         key="lease_ai_engine"
     )
-    summary_mode = st.radio(
-        "Summary Mode",
-        ["Full Document", "Page-by-Page"],
-        index=1,
-        horizontal=True,
-        key="lease_summary_mode"
-    )
 
     # Extract text if not already done or if input has changed
     if 'extracted_pages' not in st.session_state or \
        (uploaded_file and st.session_state.get('last_file') != uploaded_file.name) or \
        (image_url and st.session_state.get('last_url') != image_url):
         if st.button("Extract Text", key="lease_extract_button"):
-            used_ocr = False
-            pages = []
-            if uploaded_file and file_type == "pdf":
-                try:
-                    reader = PdfReader(uploaded_file)
-                    pages = [page.extract_text() or "" for page in reader.pages]
-                except Exception:
-                    st.error("Failed to extract text from the PDF directly.")
-                    pages = []
-
-                # Check if extracted text is empty or insufficient
-                if not any(p.strip() for p in pages):
-                    st.info("No searchable text found in the PDF. Attempting OCR extraction...")
-                    uploaded_file.seek(0)
-                    pages = extract_text_with_ocr(uploaded_file=uploaded_file, file_type="pdf")
-                    used_ocr = True
-            elif uploaded_file and file_type == "jpg":
-                st.info("Processing uploaded JPG image with OCR...")
-                uploaded_file.seek(0)
-                pages = extract_text_with_ocr(uploaded_file=uploaded_file, file_type="jpg")
-                used_ocr = True
-            elif image_url:
-                # Validate URL
-                if not image_url.lower().endswith(('.jpg', '.jpeg')):
-                    st.error("Please provide a valid JPG URL.")
-                    return
-                pages = extract_text_with_ocr(file_type="jpg", url=image_url)
-                used_ocr = True
-
-            if not any(p.strip() for p in pages):
-                st.error(f"No readable text found in the {'PDF' if file_type == 'pdf' else 'JPG'} even after OCR.")
+            pages = extract_text_with_ocr(uploaded_file=uploaded_file, file_type=file_type, url=image_url)
+            if not pages:
+                st.error(f"No readable text found in the {'PDF' if file_type == 'pdf' else 'JPG'} after OCR.")
                 return
 
-            # Store extracted pages and OCR status
+            # Store extracted pages and input identifier
             st.session_state['extracted_pages'] = pages
-            st.session_state['used_ocr'] = used_ocr
+            st.session_state['used_ocr'] = True  # Always true as OCR is enforced
             if uploaded_file:
                 st.session_state['last_file'] = uploaded_file.name
             else:
@@ -678,7 +644,6 @@ def lease_summarization_ui(conn):
             st.rerun()
 
     # Display extracted text preview if available
-    # In lease_summarization_ui, after calling extract_text_with_ocr
     if 'extracted_pages' in st.session_state:
         st.subheader("Extracted Text Preview")
         page_options = [f"Page {i+1}" for i in range(len(st.session_state['extracted_pages']))] if file_type == "pdf" else ["Image"]
@@ -693,13 +658,78 @@ def lease_summarization_ui(conn):
         extracted_text = st.session_state['extracted_pages'][page_index]
         if extracted_text.strip():
             st.text_area(
-                f"Extracted Text for {selected_page} {'(via OCR)' if st.session_state.get('used_ocr', False) else '(Direct Extraction)'}",
+                f"Extracted Text for {selected_page} (via OCR)",
                 value=extracted_text,
                 height=300,
                 key=f"extracted_text_page_{page_index}"
             )
         else:
             st.warning(f"No text extracted for {selected_page}. Try a different file or check the document quality.")
+
+        # Summary mode selection after extraction
+        summary_mode = st.radio(
+            "Summary Mode",
+            ["Full Document", "Page-by-Page"],
+            index=0,
+            horizontal=True,
+            key="lease_summary_mode"
+        )
+
+        # Generate summary if extracted pages are available and button is clicked
+        if st.button("Generate Summary", key="lease_generate_button"):
+            pages = st.session_state['extracted_pages']
+            if not any(p.strip() for p in pages):
+                st.error("No readable text available for summarization.")
+                return
+
+            st.session_state['last_mode'] = summary_mode
+            st.session_state['last_engine'] = ai_engine
+
+            if summary_mode == "Full Document":
+                text = "\n".join(pages)
+                with st.spinner("Summarizing full document..."):
+                    summaries = []
+                    chunks = [text[i:i+15000] for i in range(0, len(text), 15000)] if len(text) > 15000 else [text]
+                    for chunk in chunks:
+                        prompt = (
+                            "Summarize this portion of the lease agreement in clear, concise language, "
+                            "preserving all key details:\n\n" + chunk
+                        )
+                        summaries.append(call_mistral(
+                            messages=[{"role": "user", "content": prompt}],
+                            temperature=0.3,
+                            max_tokens=1024
+                        ))
+                    final = "\n\n".join(summaries)
+                st.subheader("Full Document Summary")
+                st.write(final)
+                save_interaction(conn, "lease_summary_full", input_identifier, final)
+                st.session_state['last_summary'] = final
+
+            else:
+                parts = []
+                st.subheader("Page-by-Page Summaries")
+                for i, pg in enumerate(pages, start=1):
+                    if not pg.strip():
+                        parts.append("(no text detected)")
+                        st.markdown(f"**Page {i}:** _(no text detected)_")
+                    else:
+                        with st.spinner(f"Summarizing page {i}..."):
+                            prompt = (
+                                f"Summarize page {i} of this lease agreement in clear, concise language, covering all information:\n\n{pg}"
+                            )
+                            summary = call_mistral(
+                                messages=[{"role": "user", "content": prompt}],
+                                temperature=0.3,
+                                max_tokens=512
+                            )
+                            st.markdown(f"**Page {i} Summary:**")
+                            st.write(summary)
+                            parts.append(summary)
+                save_interaction(conn, "lease_summary_pagewise", input_identifier, json.dumps({f"page_{i}": pages[i-1] for i in range(1, len(pages)+1)}))
+                st.session_state['last_summary'] = parts
+
+            st.rerun()
 
     # Display existing summary if available
     if 'last_summary' in st.session_state and \
@@ -721,48 +751,102 @@ def lease_summarization_ui(conn):
             summary_content = "\n\n".join(parts)
         st.divider()
 
-        # Export section styling
+        # Export section
         st.markdown("### 📥 Export Styled Summary")
         file_base = input_identifier.rsplit(".", 1)[0] if '.' in input_identifier else input_identifier
         file_name = st.text_input("Filename (no extension):", value=file_base, key="lease_export_name")
 
-        # Sanitize and split for PDF
         safe_content = summary_content.encode('latin-1', 'replace').decode('latin-1')
         paragraphs_pdf = [p.strip() for p in safe_content.split("\n\n") if p.strip()]
-        # Split original for Word
         paragraphs_word = [p.strip() for p in summary_content.split("\n\n") if p.strip()]
 
-        # PDF export with header, footer, styling
-        class PDF(FPDF):
+        class LeasePDF(FPDF):
             def header(self):
-                self.set_font('Arial', 'B', 16)
-                self.cell(0, 10, 'Lease Summary', ln=True, align='C')
-                self.set_font('Arial', '', 12)
-                self.cell(0, 8, f"Mode: {mode} | Engine: {engine}", ln=True, align='C')
-                self.ln(5)
+                self.set_font('Helvetica', 'B', 16)
+                self.set_text_color(0, 51, 102)
+                self.cell(0, 10, 'Lease Agreement Summary', 0, 1, 'C')
+                self.set_font('Helvetica', '', 10)
+                self.set_text_color(100, 100, 100)
+                self.cell(0, 6, f"Generated on {datetime.now().strftime('%B %d, %Y')}", 0, 1, 'C')
+                self.ln(10)
+
             def footer(self):
                 self.set_y(-15)
-                self.set_font('Arial', 'I', 8)
-                self.cell(0, 10, f"Page {self.page_no()}/{{nb}}", align='C')
+                self.set_font('Helvetica', 'I', 8)
+                self.set_text_color(100, 100, 100)
+                self.cell(0, 10, f"Page {self.page_no()}/{{nb}}", 0, 0, 'C')
 
-        pdf = PDF()
+            def chapter_title(self, title):
+                self.set_font('Helvetica', 'B', 12)
+                self.set_fill_color(240, 240, 240)
+                self.set_text_color(0, 51, 102)
+                self.cell(0, 8, title, 0, 1, 'L', fill=True)
+                self.ln(4)
+
+            def chapter_body(self, body):
+                self.set_font('Helvetica', '', 11)
+                self.set_text_color(0, 0, 0)
+                self.multi_cell(0, 6, body)
+                self.ln()
+
+        pdf = LeasePDF()
         pdf.alias_nb_pages()
         pdf.add_page()
-        pdf.set_font("Arial", '', 12)
-        for para in paragraphs_pdf:
-            pdf.multi_cell(0, 6, para)
-            pdf.ln(2)
-        raw_pdf = pdf.output(dest='S')
-        pdf_bytes = raw_pdf if isinstance(raw_pdf, (bytes, bytearray)) else raw_pdf.encode('latin-1', 'ignore')
+        pdf.set_auto_page_break(auto=True, margin=15)
+        pdf.set_title(f"Lease Summary - {file_name}")
+        pdf.set_author("Lease Summarization Tool")
+
+        pdf.chapter_title("Document Information")
+        pdf.set_font('Helvetica', '', 10)
+        info_rows = [
+            ("Input File:", input_identifier),
+            ("Summary Mode:", mode),
+            ("AI Model:", engine)
+        ]
+        for label, value in info_rows:
+            pdf.cell(40, 6, label, 0, 0)
+            pdf.set_font('Helvetica', 'B', 10)
+            pdf.cell(0, 6, value, 0, 1)
+            pdf.set_font('Helvetica', '', 10)
+        pdf.ln(8)
+
+        pdf.chapter_title("Lease Summary")
+        if mode == 'Full Document':
+            pdf.chapter_body(summary_content)
+        else:
+            for idx, part in enumerate(parts, start=1):
+                pdf.set_font('Helvetica', 'B', 11)
+                pdf.cell(0, 6, f"Page {idx}:", 0, 1)
+                pdf.set_font('Helvetica', '', 11)
+                pdf.multi_cell(0, 6, part)
+                pdf.ln(3)
+
+        if 'last_docx_content' in st.session_state and 'last_docx_output' in st.session_state:
+            pdf.add_page()
+            pdf.chapter_title("Additional Processing")
+            pdf.set_font('Helvetica', 'B', 11)
+            pdf.cell(0, 6, "Uploaded Document Content:", 0, HIV0, 1)
+            pdf.set_font(' Hawkins', 1)
+            pdf.multi_cell(0, 6, st.session_state['last_docx_content'])
+            pdf.ln(5)
+            pdf.set_font('Helvetica', 'B', 11)
+            pdf.cell(0, 6, "AI Response:", 0, 1)
+            pdf.set_font('Helvetica', '', 11)
+            pdf.multi_cell(0, 6, st.session_state['last_docx_output'])
+
+        try:
+            pdf_bytes = pdf.output(dest='S').encode('latin1')
+        except:
+            pdf_bytes = pdf.output(dest='S')
+
         st.download_button(
-            "Download Styled PDF",
+            label="Download Styled PDF",
             data=pdf_bytes,
             file_name=f"{file_name}.pdf",
             mime="application/pdf",
             key="lease_export_pdf"
         )
 
-        # Word export with heading and styling
         doc = docx.Document()
         style = doc.styles['Normal']
         style.font.name = 'Arial'
@@ -803,7 +887,6 @@ def lease_summarization_ui(conn):
                 st.error(f"Failed to process Word document: {e}")
                 return
 
-        # Display existing processed content and output if available
         if 'last_docx_content' in st.session_state and 'last_docx_output' in st.session_state and \
            ((uploaded_file and st.session_state.get('last_file') == uploaded_file.name) or \
             (image_url and st.session_state.get('last_url') == image_url)):
@@ -811,11 +894,9 @@ def lease_summarization_ui(conn):
                 st.write(st.session_state['last_docx_output'])
             st.divider()
 
-            # Export Processed Output
             st.markdown("### 📥 Export Processed Output")
             output_file_name = st.text_input("Output Filename (no extension):", value=f"{file_base}_processed", key="lease_output_export_name")
 
-            # PDF Export for Processed Output
             class OutputPDF(FPDF):
                 def header(self):
                     self.set_font('Arial', 'B', 16)
@@ -844,7 +925,6 @@ def lease_summarization_ui(conn):
                 key="lease_output_export_pdf"
             )
 
-            # Word Export for Processed Output
             output_doc = docx.Document()
             output_style = output_doc.styles['Normal']
             output_style.font.name = 'Arial'
@@ -866,7 +946,6 @@ def lease_summarization_ui(conn):
                 key="lease_output_export_word"
             )
 
-        # Generate output if needed
         if docx_file and 'last_docx_content' in st.session_state and 'last_docx_output' not in st.session_state:
             if st.button("Generate Response", key="lease_generate_response"):
                 with st.spinner("Generating response based on uploaded document..."):
@@ -888,61 +967,6 @@ def lease_summarization_ui(conn):
                     save_interaction(conn, "lease_docx_processing", st.session_state['last_docx_content'], response)
                     st.rerun()
 
-    # Generate summary if extracted pages are available and button is clicked
-    if 'extracted_pages' in st.session_state and st.button("Generate Summary", key="lease_generate_button"):
-        pages = st.session_state['extracted_pages']
-        if not any(p.strip() for p in pages):
-            st.error("No readable text available for summarization.")
-            return
-
-        st.session_state['last_mode'] = summary_mode
-        st.session_state['last_engine'] = ai_engine
-
-        if summary_mode == "Full Document":
-            text = "\n".join(pages)
-            with st.spinner("Quickly summarizing full document..."):
-                summaries = []
-                chunks = [text[i:i+15000] for i in range(0, len(text), 15000)] if len(text) > 15000 else [text]
-                for chunk in chunks:
-                    prompt = (
-                        "Summarize this portion of the lease agreement in clear, concise language, "
-                        "preserving all key details:\n\n" + chunk
-                    )
-                    summaries.append(call_mistral(
-                        messages=[{"role": "user", "content": prompt}],
-                        temperature=0.3,
-                        max_tokens=1024
-                    ))
-                final = "\n\n".join(summaries)
-            st.subheader("Full Document Summary")
-            st.write(final)
-            save_interaction(conn, "lease_summary_full", input_identifier, final)
-            st.session_state['last_summary'] = final
-
-        else:
-            parts = []
-            st.subheader("Page-by-Page Summaries")
-            for i, pg in enumerate(pages, start=1):
-                if not pg.strip():
-                    parts.append("(no text detected)")
-                    st.markdown(f"**Page {i}:** _(no text detected)_")
-                else:
-                    with st.spinner(f"Fast summary for page {i}..."):
-                        prompt = (
-                            f"Summarize page {i} of this lease agreement in clear, concise language, covering all information:\n\n{pg}"
-                        )
-                        summary = call_mistral(
-                            messages=[{"role": "user", "content": prompt}],
-                            temperature=0.3,
-                            max_tokens=512
-                        )
-                        st.markdown(f"**Page {i} Summary:**")
-                        st.write(summary)
-                        parts.append(summary)
-            save_interaction(conn, "lease_summary_pagewise", input_identifier, json.dumps({f"page_{i}": pages[i-1] for i in range(1, len(pages)+1)}))
-            st.session_state['last_summary'] = parts
-
-        st.rerun()
 
 
 def deal_structuring_ui(conn):
