@@ -1,3 +1,4 @@
+%%writefile app.py
 import io
 import json
 import os
@@ -27,6 +28,8 @@ import base64
 import tempfile
 from docx import Document
 import logging
+import sqlite3
+from contextlib import contextmanager
 
 # ─── Configuration ──────────────────────────────────────────────────────────────
 GOOGLE_API_KEY = os.environ.get(
@@ -167,66 +170,119 @@ def ocr_space_url(
 
 
 # ─── Database Helpers ──────────────────────────────────────────────────────────
-def init_db(db_path: str = "users.db"):
+DB_PATH = "users.db"  # Define a constant for the database path
+
+# ─── Database Helpers ──────────────────────────────────────────────────────────
+logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
+
+# Database context manager
+@contextmanager
+def get_db_connection(db_path: str = DB_PATH):
+    conn = None
+    try:
+        conn = sqlite3.connect(db_path, check_same_thread=False)
+        conn.row_factory = sqlite3.Row
+        yield conn
+    except sqlite3.Error as e:
+        logging.error(f"Database connection error: {e}")
+        raise
+    finally:
+        if conn:
+            conn.close()
+
+# Initialize database
+def init_db(db_path: str = DB_PATH):
+    """
+    Initialize the database only if it doesn't exist.
+    Creates necessary tables and ensures schema updates are non-destructive.
+    Returns a database connection.
+    """
+    db_exists = os.path.exists(db_path)
     conn = sqlite3.connect(db_path, check_same_thread=False)
-    cursor = conn.cursor()
-    cursor.execute(
-        """
-        CREATE TABLE IF NOT EXISTS users (
-            username TEXT PRIMARY KEY,
-            password BLOB NOT NULL,
-            role TEXT NOT NULL,
-            location_id TEXT,
-            last_login TIMESTAMP,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        )
-        """
-    )
-    cursor.execute("PRAGMA table_info(users)")
-    existing_cols = [col[1] for col in cursor.fetchall()]
-    for col in ["location_id", "last_login", "created_at"]:
-        if col not in existing_cols:
-            try:
-                cursor.execute(f"ALTER TABLE users ADD COLUMN {col} TEXT")
-            except sqlite3.OperationalError:
-                pass
+    conn.row_factory = sqlite3.Row
 
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS subscriptions (
-            username TEXT PRIMARY KEY,
-            lease_analysis INTEGER DEFAULT 0,
-            deal_structuring INTEGER DEFAULT 0,
-            offer_generator INTEGER DEFAULT 0,
-            FOREIGN KEY(username) REFERENCES users(username)
-        )
-    """)
+    try:
+        cursor = conn.cursor()
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS users (
+                username TEXT PRIMARY KEY,
+                password BLOB NOT NULL,
+                role TEXT NOT NULL,
+                location_id TEXT,
+                last_login TIMESTAMP,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        cursor.execute("PRAGMA table_info(users)")
+        existing_cols = {col[1] for col in cursor.fetchall()}
+        for col, col_type in [
+            ("location_id", "TEXT"),
+            ("last_login", "TIMESTAMP"),
+            ("created_at", "TIMESTAMP DEFAULT CURRENT_TIMESTAMP")
+        ]:
+            if col not in existing_cols:
+                try:
+                    cursor.execute(f"ALTER TABLE users ADD COLUMN {col} {col_type}")
+                    logging.info(f"Added {col} column to users table")
+                except sqlite3.OperationalError as e:
+                    logging.warning(f"Could not add {col} column: {e}")
 
-    cursor.execute(
-        """
-        CREATE TABLE IF NOT EXISTS interactions (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            username TEXT,
-            feature TEXT,
-            input_text TEXT,
-            output_text TEXT,
-            timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            FOREIGN KEY(username) REFERENCES users(username)
-        )
-        """
-    )
-    conn.commit()
-    return conn
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS subscriptions (
+                username TEXT PRIMARY KEY,
+                lease_analysis INTEGER DEFAULT 0,
+                deal_structuring INTEGER DEFAULT 0,
+                offer_generator INTEGER DEFAULT 0,
+                FOREIGN KEY(username) REFERENCES users(username)
+            )
+        """)
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS interactions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                username TEXT,
+                feature TEXT,
+                input_text TEXT,
+                output_text TEXT,
+                timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY(username) REFERENCES users(username)
+            )
+        """)
+        conn.commit()
+
+        if not db_exists:
+            create_default_admin(conn)
+
+        return conn
+    except sqlite3.Error as e:
+        logging.error(f"Database initialization failed: {e}")
+        st.error(f"Failed to initialize database: {e}")
+        conn.close()
+        raise
+
+# Verify password
+def verify_password(hashed: bytes, password: str) -> bool:
+    return bcrypt.checkpw(password.encode(), hashed)
 
 def create_default_admin(conn):
-    cursor = conn.cursor()
-    cursor.execute("SELECT COUNT(*) FROM users")
-    if cursor.fetchone()[0] == 0:
-        admin_pwd = bcrypt.hashpw("admin123".encode(), bcrypt.gensalt())
-        cursor.execute(
-            "INSERT INTO users (username, password, role) VALUES (?, ?, ?)",
-            ("admin", admin_pwd, "admin"),
-        )
-        conn.commit()
+    """Create a default admin user if none exists."""
+    try:
+        cursor = conn.cursor()
+        cursor.execute("SELECT COUNT(*) FROM users")
+        if cursor.fetchone()[0] == 0:
+            admin_pwd = bcrypt.hashpw("admin123".encode(), bcrypt.gensalt())
+            cursor.execute(
+                "INSERT INTO users (username, password, role) VALUES (?, ?, ?)",
+                ("admin", admin_pwd, "admin")
+            )
+            cursor.execute(
+                "INSERT INTO subscriptions (username, lease_analysis, deal_structuring, offer_generator) VALUES (?, ?, ?, ?)",
+                ("admin", 1, 1, 1)
+            )
+            conn.commit()
+            logging.info("Default admin user created")
+    except sqlite3.Error as e:
+        logging.error(f"Failed to create default admin: {e}")
+        raise
 
 def verify_password(hashed: bytes, password: str) -> bool:
     return bcrypt.checkpw(password.encode(), hashed)
@@ -752,201 +808,222 @@ def lease_summarization_ui(conn):
         st.divider()
 
         # Export section
+        # Export section
+        # 📥 Export Styled Summary
         st.markdown("### 📥 Export Styled Summary")
-        file_base = input_identifier.rsplit(".", 1)[0] if '.' in input_identifier else input_identifier
+
+        # derive default filename
+        file_base = input_identifier.rsplit(".", 1)[0]
         file_name = st.text_input("Filename (no extension):", value=file_base, key="lease_export_name")
 
+        # sanitize content
         safe_content = summary_content.encode('latin-1', 'replace').decode('latin-1')
-        paragraphs_pdf = [p.strip() for p in safe_content.split("\n\n") if p.strip()]
+        paragraphs_pdf  = [p.strip() for p in safe_content.split("\n\n") if p.strip()]
         paragraphs_word = [p.strip() for p in summary_content.split("\n\n") if p.strip()]
 
+        # ─── PDF EXPORT ────────────────────────────────────────────────────────────────
+        # ─── PDF EXPORT ────────────────────────────────────────────────────────────────
         class LeasePDF(FPDF):
             def header(self):
-                self.set_font('Helvetica', 'B', 16)
-                self.set_text_color(0, 51, 102)
-                self.cell(0, 10, 'Lease Agreement Summary', 0, 1, 'C')
-                self.set_font('Helvetica', '', 10)
-                self.set_text_color(100, 100, 100)
-                self.cell(0, 6, f"Generated on {datetime.now().strftime('%B %d, %Y')}", 0, 1, 'C')
-                self.ln(10)
+                # Title
+                self.set_font('Arial', 'B', 20)
+                self.set_text_color(30, 90, 140)  # Refined brand color
+                self.cell(0, 12, "Lease Agreement Summary", ln=1, align='C')
+                # Date
+                self.set_font('Arial', 'I', 10)
+                self.set_text_color(120, 120, 120)  # Subtle gray
+                date_str = datetime.now().strftime("%B %d, %Y")
+                self.cell(0, 6, date_str, ln=1, align='C')
+                # Divider
+                self.set_draw_color(200, 200, 200)
+                self.set_line_width(0.4)
+                y = self.get_y() + 2
+                self.line(15, y, 195, y)
+                self.ln(8)
 
             def footer(self):
                 self.set_y(-15)
-                self.set_font('Helvetica', 'I', 8)
-                self.set_text_color(100, 100, 100)
-                self.cell(0, 10, f"Page {self.page_no()}/{{nb}}", 0, 0, 'C')
+                self.set_font('Arial', 'I', 8)
+                self.set_text_color(130, 130, 130)
+                page_info = f"Page {self.page_no()} / {{nb}}"
+                self.cell(0, 10, page_info, align='C')
 
-            def chapter_title(self, title):
-                self.set_font('Helvetica', 'B', 12)
-                self.set_fill_color(240, 240, 240)
-                self.set_text_color(0, 51, 102)
-                self.cell(0, 8, title, 0, 1, 'L', fill=True)
+            def section_title(self, title):
+                self.set_font('Arial', 'B', 14)
+                self.set_fill_color(245, 245, 245)  # Light gray background
+                self.set_text_color(30, 90, 140)
+                self.cell(0, 8, title, ln=1, fill=True, border=0)
+                # Underline
+                x1, x2 = self.l_margin, self.w - self.r_margin
+                y = self.get_y() - 1
+                self.set_draw_color(30, 90, 140)
+                self.set_line_width(0.3)
+                self.line(x1, y, x2, y)
                 self.ln(4)
 
-            def chapter_body(self, body):
-                self.set_font('Helvetica', '', 11)
-                self.set_text_color(0, 0, 0)
-                self.multi_cell(0, 6, body)
-                self.ln()
+            def paragraph(self, text):
+                self.set_font('Arial', '', 12)
+                self.set_text_color(50, 50, 50)
+                self.multi_cell(0, 7, text.encode('latin-1', 'replace').decode('latin-1'))
+                self.ln(4)
 
+            def render_summary_md(self, md_text):
+                lines = md_text.splitlines()
+                list_level = 0
+                for raw in lines:
+                    line = raw.rstrip()
+                    if not line:
+                        self.ln(4)
+                        continue
+                    # Heading
+                    if line.startswith("### "):
+                        self.section_title(line[4:].strip())
+                        continue
+                    # Bold label
+                    m = re.match(r"\*\*(.+?)\*\*:", line)
+                    if m:
+                        self.set_font('Arial', 'B', 12)
+                        self.set_text_color(30, 90, 140)
+                        self.cell(0, 6, m.group(1) + ":", ln=1)
+                        self.ln(2)
+                        continue
+                    # Italic text
+                    m = re.match(r"\*(.+?)\*", line)
+                    if m:
+                        self.set_font('Arial', 'I', 12)
+                        self.set_text_color(80, 80, 80)
+                        self.multi_cell(0, 7, m.group(1))
+                        self.ln(2)
+                        self.set_font('Arial', '', 12)
+                        self.set_text_color(50, 50, 50)
+                        continue
+                    # Numbered list
+                    m = re.match(r"^(\d+)\.\s+(.*)", line)
+                    if m:
+                        num, text = m.groups()
+                        indent = 10 * list_level
+                        self.set_x(self.l_margin + indent)
+                        self.set_font('Arial', 'B', 11)
+                        self.cell(8, 7, f"{num}.", ln=0)
+                        self.set_font('Arial', '', 12)
+                        self.multi_cell(0, 7, text)
+                        list_level = 1
+                        continue
+                    # Bullet list
+                    m = re.match(r"^\s*-\s+(.*)", line)
+                    if m:
+                        text = m.group(1)
+                        indent = 10 * list_level
+                        self.set_x(self.l_margin + indent)
+                        self.set_font('Arial', '', 12)
+                        self.cell(5, 7, "*")
+                        self.multi_cell(0, 7, text)
+                        list_level = 1
+                        continue
+                    # End list
+                    if list_level and not (line.startswith("- ") or re.match(r"^\d+\.\s+", line)):
+                        list_level = 0
+                        self.ln(2)
+                    # Normal text
+                    self.set_font('Arial', '', 12)
+                    self.multi_cell(0, 7, line)
+                    self.ln(2)
+
+
+        # Build PDF
         pdf = LeasePDF()
-        pdf.alias_nb_pages()
+        pdf.set_auto_page_break(True, margin=20)
         pdf.add_page()
-        pdf.set_auto_page_break(auto=True, margin=15)
-        pdf.set_title(f"Lease Summary - {file_name}")
-        pdf.set_author("Lease Summarization Tool")
+        pdf.set_left_margin(20)
+        pdf.set_right_margin(20)
+        pdf.set_title(f"Lease Summary – {file_name}")
+        pdf.set_author("Property Deals AI")
 
-        pdf.chapter_title("Document Information")
-        pdf.set_font('Helvetica', '', 10)
-        info_rows = [
-            ("Input File:", input_identifier),
-            ("Summary Mode:", mode),
-            ("AI Model:", engine)
+        # Document Information Section
+        pdf.section_title("Document Information")
+        info = [
+            ("Input File", input_identifier),
+            ("Mode", mode),
+            ("AI Model", engine),
+            ("Generated at", datetime.now().strftime("%Y-%m-%d %H:%M:%S")),
         ]
-        for label, value in info_rows:
-            pdf.cell(40, 6, label, 0, 0)
-            pdf.set_font('Helvetica', 'B', 10)
-            pdf.cell(0, 6, value, 0, 1)
-            pdf.set_font('Helvetica', '', 10)
-        pdf.ln(8)
+        for i, (label, val) in enumerate(info):
+            pdf.set_fill_color(245, 245, 245) if i % 2 else pdf.set_fill_color(255, 255, 255)
+            pdf.set_font('Arial', 'B', 11)
+            pdf.cell(50, 6, f"{label}:", ln=0, fill=True)
+            pdf.set_font('Arial', '', 11)
+            pdf.cell(0, 6, val.encode('latin-1', 'replace').decode('latin-1'), ln=1, fill=True)
+        pdf.ln(6)
 
-        pdf.chapter_title("Lease Summary")
+        # Lease Summary Section
+        pdf.section_title("Lease Summary")
         if mode == 'Full Document':
-            pdf.chapter_body(summary_content)
+            pdf.render_summary_md(safe_content)
         else:
-            for idx, part in enumerate(parts, start=1):
-                pdf.set_font('Helvetica', 'B', 11)
-                pdf.cell(0, 6, f"Page {idx}:", 0, 1)
-                pdf.set_font('Helvetica', '', 11)
-                pdf.multi_cell(0, 6, part)
-                pdf.ln(3)
+            for i, part in enumerate(parts, start=1):
+                pdf.section_title(f"Page {i} Summary")
+                pdf.render_summary_md(part)
 
-        if 'last_docx_content' in st.session_state and 'last_docx_output' in st.session_state:
+        # Optional Additional Processing
+        if st.session_state.get('last_docx_content'):
             pdf.add_page()
-            pdf.chapter_title("Additional Processing")
-            pdf.set_font('Helvetica', 'B', 11)
-            pdf.cell(0, 6, "Uploaded Document Content:", 0, HIV0, 1)
-            pdf.set_font(' Hawkins', 1)
-            pdf.multi_cell(0, 6, st.session_state['last_docx_content'])
-            pdf.ln(5)
-            pdf.set_font('Helvetica', 'B', 11)
-            pdf.cell(0, 6, "AI Response:", 0, 1)
-            pdf.set_font('Helvetica', '', 11)
-            pdf.multi_cell(0, 6, st.session_state['last_docx_output'])
+            pdf.section_title("Additional Processing")
+            pdf.set_font('Arial', 'B', 11)
+            pdf.cell(0, 6, "Original Document Text:", ln=1)
+            pdf.render_summary_md(st.session_state['last_docx_content'])
+            pdf.ln(4)
+            pdf.set_font('Arial', 'B', 11)
+            pdf.cell(0, 6, "AI Summary Response:", ln=1)
+            pdf.render_summary_md(st.session_state.get('last_docx_output', ''))
 
+        # Output PDF button
         try:
-            pdf_bytes = pdf.output(dest='S').encode('latin1')
-        except:
-            pdf_bytes = pdf.output(dest='S')
-
-        st.download_button(
-            label="Download Styled PDF",
-            data=pdf_bytes,
-            file_name=f"{file_name}.pdf",
-            mime="application/pdf",
-            key="lease_export_pdf"
-        )
-
+            pdf_bytes = pdf.output(dest='S').encode('latin-1', 'ignore')
+            st.download_button(
+                "Download Styled PDF",
+                pdf_bytes,
+                file_name=f"{file_name}.pdf",
+                mime="application/pdf",
+                key="lease_export_pdf"
+            )
+        except Exception as e:
+            st.error(f"PDF generation failed: {e}")
+        # ─── WORD EXPORT ───────────────────────────────────────────────────────────────
         doc = docx.Document()
-        style = doc.styles['Normal']
-        style.font.name = 'Arial'
-        style.font.size = Pt(12)
-        doc.add_heading('Lease Summary', level=1)
-        doc.add_paragraph(f"Mode: {mode} | Engine: {engine}")
-        doc.add_paragraph("")
+        # adjust page margins
+        sections = doc.sections
+        for sec in sections:
+            sec.top_margin    = docx.shared.Cm(2.5)
+            sec.bottom_margin = docx.shared.Cm(2.5)
+            sec.left_margin   = docx.shared.Cm(2.0)
+            sec.right_margin  = docx.shared.Cm(2.0)
+
+        # style heading
+        doc.styles['Heading 1'].font.name = 'Calibri'
+        doc.styles['Heading 1'].font.size = Pt(16)
+        doc.styles['Heading 1'].font.color.rgb = docx.shared.RGBColor(44,134,171)
+        doc.styles['Normal'].font.name = 'Arial'
+        doc.styles['Normal'].font.size = Pt(12)
+
+        doc.add_heading("Lease Agreement Summary", level=1)
+        doc.add_paragraph(f"Mode: {mode}    AI Model: {engine}", style='Normal')
+
         for para in paragraphs_word:
-            doc.add_paragraph(para)
+            doc.add_paragraph(para, style='Normal')
+
+        # download button
         buf = io.BytesIO()
         doc.save(buf)
         st.download_button(
             "Download Styled Word",
-            data=buf.getvalue(),
+            buf.getvalue(),
             file_name=f"{file_name}.docx",
             mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
             key="lease_export_word"
         )
 
-        # Document Upload and Processing Section
-        st.divider()
-        st.markdown("### 📝 Process Additional Document")
-        st.markdown("Upload a Word document (.docx) with any content related to the lease summary (e.g., comments, instructions, or additional details) to get an AI-generated response.")
 
-        docx_file = st.file_uploader(
-            "Upload Document (Word Document)", type=["docx"], key="lease_docx_uploader"
-        )
-
-        if docx_file:
-            try:
-                doc = docx.Document(docx_file)
-                docx_content = "\n".join([para.text.strip() for para in doc.paragraphs if para.text.strip()])
-                if not docx_content:
-                    st.error("No valid content found in the document.")
-                else:
-                    st.session_state['last_docx_content'] = docx_content
-            except Exception as e:
-                st.error(f"Failed to process Word document: {e}")
-                return
-
-        if 'last_docx_content' in st.session_state and 'last_docx_output' in st.session_state and \
-           ((uploaded_file and st.session_state.get('last_file') == uploaded_file.name) or \
-            (image_url and st.session_state.get('last_url') == image_url)):
-            with st.expander(f"AI Response ({engine})"):
-                st.write(st.session_state['last_docx_output'])
-            st.divider()
-
-            st.markdown("### 📥 Export Processed Output")
-            output_file_name = st.text_input("Output Filename (no extension):", value=f"{file_base}_processed", key="lease_output_export_name")
-
-            class OutputPDF(FPDF):
-                def header(self):
-                    self.set_font('Arial', 'B', 16)
-                    self.cell(0, 10, 'Lease Summary Processed Output', ln=True, align='C')
-                    self.set_font('Arial', '', 12)
-                    self.cell(0, 8, f"Mode: {mode} | Engine: {engine}", ln=True, align='C')
-                    self.ln(5)
-                def footer(self):
-                    self.set_y(-15)
-                    self.set_font('Arial', 'I', 8)
-                    self.cell(0, 10, f"Page {self.page_no()}/{{nb}}", align='C')
-
-            output_pdf = OutputPDF()
-            output_pdf.alias_nb_pages()
-            output_pdf.add_page()
-            output_pdf.set_font("Arial", '', 12)
-            output_pdf.multi_cell(0, 6, f"Uploaded Document Content:\n{st.session_state['last_docx_content'].encode('latin-1', 'replace').decode('latin-1')}")
-            output_pdf.ln(4)
-            output_pdf.multi_cell(0, 6, f"AI Response:\n{st.session_state['last_docx_output'].encode('latin-1', 'replace').decode('latin-1')}")
-            output_pdf_bytes = output_pdf.output(dest='S')
-            st.download_button(
-                "Download Processed Output PDF",
-                data=output_pdf_bytes,
-                file_name=f"{output_file_name}.pdf",
-                mime="application/pdf",
-                key="lease_output_export_pdf"
-            )
-
-            output_doc = docx.Document()
-            output_style = output_doc.styles['Normal']
-            output_style.font.name = 'Arial'
-            output_style.font.size = Pt(12)
-            output_doc.add_heading('Lease Summary Processed Output', level=1)
-            output_doc.add_paragraph(f"Mode: {mode} | Engine: {engine}")
-            output_doc.add_paragraph("")
-            output_doc.add_heading("Uploaded Document Content", level=2)
-            output_doc.add_paragraph(st.session_state['last_docx_content'])
-            output_doc.add_heading("AI Response", level=2)
-            output_doc.add_paragraph(st.session_state['last_docx_output'])
-            output_buf = io.BytesIO()
-            output_doc.save(output_buf)
-            st.download_button(
-                "Download Processed Output Word",
-                data=output_buf.getvalue(),
-                file_name=f"{output_file_name}.docx",
-                mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-                key="lease_output_export_word"
-            )
-
-        if docx_file and 'last_docx_content' in st.session_state and 'last_docx_output' not in st.session_state:
+        if doc and 'last_docx_content' in st.session_state and 'last_docx_output' not in st.session_state:
             if st.button("Generate Response", key="lease_generate_response"):
                 with st.spinner("Generating response based on uploaded document..."):
                     prompt = (
@@ -1858,46 +1935,106 @@ def chatbot_ui(conn):
         # Save interaction
         save_interaction(conn, "chatbot", user_input, answer)
 
-def login_ui(conn):
-    """Handle user login with username and password verification"""
-    st.title("🔐 Login to Property Deals AI")
-    st.markdown("Please enter your credentials to access the platform.")
+# Registration UI
+def register_ui(conn):
+    st.title("📝 Register")
+    st.markdown("Create a new account.")
 
-    with st.form("login_form"):
-        username = st.text_input("Username", key="login_username")
-        password = st.text_input("Password", type="password", key="login_password")
-        submitted = st.form_submit_button("Login")
+    with st.form("register_form"):
+        username = st.text_input("Username", placeholder="Enter your username")
+        password = st.text_input("Password", type="password", placeholder="Enter your password")
+        confirm_password = st.text_input("Confirm Password", type="password", placeholder="Confirm your password")
+        location_id = st.text_input("Location ID (optional)", placeholder="Enter location ID if applicable")
+        submitted = st.form_submit_button("Register")
 
         if submitted:
-            if not username or not password:
-                st.error("Please provide both username and password.")
+            # Input validation
+            if not username or not password or not confirm_password:
+                st.error("All required fields must be filled.")
+                return
+            if len(password) < 8:
+                st.error("Password must be at least 8 characters long.")
+                return
+            if password != confirm_password:
+                st.error("Passwords do not match.")
+                return
+            if not re.match(r"^[a-zA-Z0-9_]+$", username):
+                st.error("Username can only contain letters, numbers, and underscores.")
                 return
 
+            # Check for existing username
             cursor = conn.cursor()
-            cursor.execute(
-                "SELECT password, role, location_id FROM users WHERE username = ?",
-                (username,)
-            )
-            user = cursor.fetchone()
+            cursor.execute("SELECT username FROM users WHERE username = ?", (username,))
+            if cursor.fetchone():
+                st.error("Username already exists. Please choose a different username.")
+                return
 
-            if user and verify_password(user[0], password):
-                st.session_state.logged_in = True
-                st.session_state.username = username
-                st.session_state.role = user[1]
-                st.session_state.location_id = user[2] if user[2] else None
-
-                # Update last login timestamp
+            # Register user
+            try:
+                hashed = bcrypt.hashpw(password.encode(), bcrypt.gensalt())
                 cursor.execute(
-                    "UPDATE users SET last_login = ? WHERE username = ?",
-                    (datetime.now().strftime("%Y-%m-%d %H:%M:%S"), username)
+                    "INSERT INTO users (username, password, role, location_id, created_at) VALUES (?, ?, ?, ?, ?)",
+                    (username, hashed, "user", location_id or None, datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+                )
+                cursor.execute(
+                    "INSERT INTO subscriptions (username, lease_analysis, deal_structuring, offer_generator) VALUES (?, ?, ?, ?)",
+                    (username, 0, 0, 0)
                 )
                 conn.commit()
+                st.success("Registration successful! You can now log in.")
+                logging.info(f"User {username} registered successfully")
+            except sqlite3.Error as e:
+                st.error(f"Registration failed: {e}")
+                logging.error(f"Registration failed for {username}: {e}")
 
-                st.success(f"Welcome, {username}!")
-                time.sleep(1)
-                st.rerun()
-            else:
-                st.error("Invalid username or password.")
+def login_ui(conn):
+    """Handle user login and registration with tabbed interface"""
+    st.title("🔐 Property Deals AI")
+    st.markdown("Access or create your account to use the platform.")
+
+    # Create tabs for Login and Register
+    login_tab, register_tab = st.tabs(["Login", "Register"])
+
+    with login_tab:
+        st.markdown("### Log In")
+        with st.form("login_form"):
+            username = st.text_input("Username", key="login_username")
+            password = st.text_input("Password", type="password", key="login_password")
+            submitted = st.form_submit_button("Login")
+
+            if submitted:
+                if not username or not password:
+                    st.error("Please provide both username and password.")
+                    return
+
+                cursor = conn.cursor()
+                cursor.execute(
+                    "SELECT password, role, location_id FROM users WHERE username = ?",
+                    (username,)
+                )
+                user = cursor.fetchone()
+
+                if user and verify_password(user[0], password):
+                    st.session_state.logged_in = True
+                    st.session_state.username = username
+                    st.session_state.role = user[1]
+                    st.session_state.location_id = user[2] if user[2] else None
+
+                    # Update last login timestamp
+                    cursor.execute(
+                        "UPDATE users SET last_login = ? WHERE username = ?",
+                        (datetime.now().strftime("%Y-%m-%d %H:%M:%S"), username)
+                    )
+                    conn.commit()
+
+                    st.success(f"Welcome, {username}!")
+                    time.sleep(1)
+                    st.rerun()
+                else:
+                    st.error("Invalid username or password.")
+
+    with register_tab:
+        register_ui(conn)
 
 def main():
     """Main application function with comprehensive error handling and persistent outputs"""
@@ -1927,29 +2064,22 @@ def main():
                 background-color: {BRAND_COLORS['secondary']};
                 color: white;
             }}
-            /* Input styling: black background, white text */
             .stTextInput>div>div>input,
             .stTextArea>div>div>textarea {{
                 background-color: black !important;
                 color: white !important;
-            }}
-            /* Placeholder text styling
-            .stTextInput>div>div>input::placeholder,
-            .stTextArea>div>div>textarea::placeholder {{
-                color: white !important;
-                opacity: 1 !important;
             }}
         </style>
         """,
         unsafe_allow_html=True
     )
 
-    # Initialize database and session
+    # Initialize database
     try:
-        conn = init_db()
-        create_default_admin(conn)
-    except sqlite3.Error as e:
-        st.error(f"Failed to initialize database: {e}")
+        conn = init_db(DB_PATH)
+        conn.close()  # Close initial connection after initialization
+    except Exception as e:
+        st.error(f"Failed to initialize application: {e}")
         return
 
     # Ensure login state
@@ -1967,50 +2097,50 @@ def main():
 
     # Authentication flow
     if not st.session_state.logged_in:
-        login_ui(conn)
+        with get_db_connection(DB_PATH) as conn:
+            login_ui(conn)
         return
 
     # After login check, get user's subscription status
     if st.session_state.logged_in:
-        sub = conn.execute(
-            "SELECT lease_analysis, deal_structuring, offer_generator FROM subscriptions WHERE username = ?",
-            (st.session_state.username,)
-        ).fetchone()
+        try:
+            with get_db_connection(DB_PATH) as conn:
+                sub = conn.execute(
+                    "SELECT lease_analysis, deal_structuring, offer_generator FROM subscriptions WHERE username = ?",
+                    (st.session_state.username,)
+                ).fetchone()
 
-        # Default to no access if no record exists (except for admin)
-        if not sub and st.session_state.role != "admin":
-            conn.execute(
-                "INSERT INTO subscriptions (username) VALUES (?)",
-                (st.session_state.username,)
-            )
-            conn.commit()
-            sub = (0, 0, 0)
-        elif st.session_state.role == "admin":
-            # Admin has access to everything
-            sub = (1, 1, 1)
+                if not sub and st.session_state.role != "admin":
+                    conn.execute(
+                        "INSERT INTO subscriptions (username) VALUES (?)",
+                        (st.session_state.username,)
+                    )
+                    conn.commit()
+                    sub = (0, 0, 0)
+                elif st.session_state.role == "admin":
+                    sub = (1, 1, 1)
 
-        st.session_state.subscription = {
-            "lease_analysis": bool(sub[0]),
-            "deal_structuring": bool(sub[1]),
-            "offer_generator": bool(sub[2])
-        }
+                st.session_state.subscription = {
+                    "lease_analysis": bool(sub[0]),
+                    "deal_structuring": bool(sub[1]),
+                    "offer_generator": bool(sub[2])
+                }
+        except sqlite3.Error as e:
+            st.error(f"Error fetching subscription status: {e}")
+            return
 
     # Sidebar navigation - only show accessible features
     st.sidebar.title(f"Welcome, {st.session_state.username}")
     st.sidebar.markdown(f"**Location ID:** {st.session_state.get('location_id', 'Not specified')}")
 
     features = []
-
     if st.session_state.subscription.get("lease_analysis") or st.session_state.role == "admin":
         features.append("LeaseBrief Buddy")
     if st.session_state.subscription.get("deal_structuring") or st.session_state.role == "admin":
         features.append("Auction Buddy")
     if st.session_state.subscription.get("offer_generator") or st.session_state.role == "admin":
         features.append("Offer Buddy")
-
-
-    features.append("History")  # History is always available
-
+    features.append("History")
     if st.session_state.role == "admin":
         features.insert(-1, "Admin Portal")
 
@@ -2018,24 +2148,29 @@ def main():
 
     # Main content
     try:
-        if selected == "LeaseBrief Buddy":
-            lease_summarization_ui(conn)
-        elif selected == "Auction Buddy":
-            deal_structuring_ui(conn)
-        elif selected == "Offer Buddy":
-            offer_generator_ui(conn)
-        elif selected == "History":
-            history_ui(conn)
-        elif selected == "Admin Portal" and st.session_state.role == "admin":
-            admin_portal_ui(conn)
-        else:
-            st.error("Access Denied")
+        with get_db_connection(DB_PATH) as conn:
+            if selected == "LeaseBrief Buddy":
+                lease_summarization_ui(conn)
+            elif selected == "Auction Buddy":
+                deal_structuring_ui(conn)
+            elif selected == "Offer Buddy":
+                offer_generator_ui(conn)
+            elif selected == "History":
+                history_ui(conn)
+            elif selected == "Admin Portal" and st.session_state.role == "admin":
+                admin_portal_ui(conn)
+            else:
+                st.error("Access Denied")
     except Exception as e:
         st.error(f"Error in {selected} feature: {e}")
 
     # Divider and chatbot helper
     st.divider()
-    chatbot_ui(conn)
+    try:
+        with get_db_connection(DB_PATH) as conn:
+            chatbot_ui(conn)
+    except Exception as e:
+        st.error(f"Error in chatbot: {e}")
 
     # Logout
     st.sidebar.divider()
@@ -2043,7 +2178,6 @@ def main():
         for key in list(st.session_state.keys()):
             del st.session_state[key]
         st.rerun()
-
 
 if __name__ == "__main__":
     main()
