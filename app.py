@@ -439,8 +439,8 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(
 
 def extract_text_with_ocr(uploaded_file=None, file_type: str = "pdf", url: str = None):
     """Enhanced text extraction with OCR.space API for PDFs and images.
-    - Direct per-page extraction with fallback to per-page OCR
-    - Merges direct and OCR results to maintain page order
+    - Forces OCR on all PDF pages, ignoring selectable text
+    - Merges OCR results to maintain page order
     - Detailed logging for debugging
     """
     def validate_extracted_text(text: str) -> bool:
@@ -457,90 +457,9 @@ def extract_text_with_ocr(uploaded_file=None, file_type: str = "pdf", url: str =
         used_ocr = False
 
         # Handle uploaded file case
-        if uploaded_file and file_type.lower() == "pdf":
-            reader = PdfReader(uploaded_file)
-            # ── Try direct per-page extraction ─────────────────────────
-            for i, page in enumerate(reader.pages):
-                raw = page.extract_text() or ""
-                cleaned = clean_text(raw)
-                if validate_extracted_text(cleaned):
-                    pages_text.append(cleaned)
-                else:
-                    logging.info(f"Page {i+1} empty; falling back to per-page OCR.")
-                    # Create single-page PDF
-                    from PyPDF2 import PdfWriter
-                    writer = PdfWriter()
-                    writer.add_page(page)
-                    with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as onepagetmp:
-                        writer.write(onepagetmp)
-                        tmp_pdf = onepagetmp.name
-
-                    # Convert to image
-                    images = convert_pdf_to_images(tmp_pdf, tempfile.gettempdir(), dpi=300)
-                    os.unlink(tmp_pdf)
-
-                    # OCR the first image
-                    page_text = ""
-                    if images:
-                        img = Image.open(images[0])
-                        img = preprocess_image_for_ocr(img)
-                        with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as imgf:
-                            img.save(imgf.name, "PNG", quality=100)
-                            resp = ocr_space_file_pro(
-                                filename=imgf.name,
-                                api_key=OCR_API_KEY,
-                                language='eng',
-                                retries=2,
-                                timeout=60
-                            )
-                        os.unlink(imgf.name)
-                        page_text = clean_text(
-                            resp.get("ParsedResults", [{}])[0].get("ParsedText", "")
-                        )
-                        used_ocr = True
-                    pages_text.append(page_text)
-
-                    # Clean up intermediate images
-                    for img_path in images:
-                        try:
-                            os.unlink(img_path)
-                        except:
-                            pass
-
-            return pages_text
-
-        # Handle uploaded file case
-        # Handle uploaded file
         if uploaded_file:
             if file_type.lower() == "pdf":
-                # 1. Try direct text extraction first
-                try:
-                    reader = PdfReader(uploaded_file)
-                    direct_pages = [clean_text(p.extract_text() or "") for p in reader.pages]
-                except Exception as e:
-                    logging.warning(f"Direct PDF extraction failed: {e}")
-                    direct_pages = []
-                    # ————— Updated boilerplate detection —————
-                    bp_phrase = "incomplete without the preceding notes"
-                    bp_count = sum(1 for p in direct_pages if bp_phrase in p.lower())
-                    if bp_count >= 0.8 * len(direct_pages):
-                        logging.info(f"Detected {bp_count}/{len(direct_pages)} boilerplate pages; forcing OCR.")
-                        direct_pages = []
-                    # ————————————————————————————————
-
-                # ————————— Patch starts here —————————
-                unique_pages = set(direct_pages)
-                if len(unique_pages) == 1 and 'official copy' in next(iter(unique_pages)).lower():
-                    logging.info("Detected boilerplate repetition; forcing OCR extraction.")
-                    direct_pages = []
-                # ————————— Patch ends here —————————
-
-                # 2. If any page has real text, trust direct extraction
-                if any(len(p.split()) >= 2 for p in direct_pages):
-                    logging.info("Using direct PDF text extraction, skipping OCR.")
-                    return direct_pages
-
-                # 3. Otherwise fall back to image-based OCR
+                # Force OCR for all pages
                 with tempfile.TemporaryDirectory() as temp_dir:
                     uploaded_file.seek(0)
                     images = convert_pdf_to_images(uploaded_file, temp_dir, dpi=300)
@@ -571,15 +490,13 @@ def extract_text_with_ocr(uploaded_file=None, file_type: str = "pdf", url: str =
                             logging.error(f"OCR failed for page {i+1}: {e}")
                             ocr_pages.append("")
                         progress.progress((i + 1) / len(images))
+                        # Clean up intermediate images
+                        try:
+                            os.unlink(img_path)
+                        except:
+                            pass
 
-                    # 4. Merge direct vs OCR
-                    for direct, ocr in zip(direct_pages, ocr_pages):
-                        if validate_extracted_text(direct):
-                            pages_text.append(direct)
-                        elif validate_extracted_text(ocr):
-                            pages_text.append(ocr)
-                        else:
-                            pages_text.append(clean_text(direct + " " + ocr))
+                    pages_text = ocr_pages
 
             # Image processing (JPG)
             else:
@@ -609,6 +526,28 @@ def extract_text_with_ocr(uploaded_file=None, file_type: str = "pdf", url: str =
                     st.error("OCR failed to extract meaningful text from JPG.")
                     logging.error("No meaningful text from JPG")
 
+        # Handle URL case (JPG only)
+        elif url:
+            st.info("Processing JPG URL with OCR.space API...")
+            logging.info(f"Processing JPG from URL: {url}")
+            response = ocr_space_url(
+                url=url,
+                api_key=OCR_API_KEY,
+                language='eng',
+                retries=2,
+                timeout=60
+            )
+            parsed_text = response.get("ParsedResults", [{}])[0].get("ParsedText", "")
+            cleaned_text = clean_text(parsed_text)
+            if validate_extracted_text(cleaned_text):
+                pages_text.append(cleaned_text)
+                used_ocr = True
+                logging.info(f"OCR for URL JPG: {len(cleaned_text)} chars")
+            else:
+                pages_text.append("")
+                st.error("OCR failed to extract meaningful text from JPG URL.")
+                logging.error("No meaningful text from JPG URL")
+
         # Validate final results
         if not any(validate_extracted_text(p) for p in pages_text):
             st.error("Failed to extract meaningful text from the document.")
@@ -621,8 +560,8 @@ def extract_text_with_ocr(uploaded_file=None, file_type: str = "pdf", url: str =
 
     except Exception as e:
         logging.error(f"extract_text_with_ocr failed: {e}", exc_info=True)
+        st.error(f"Text extraction failed: {e}")
         return []
-
 
 def lease_summarization_ui(conn):
     """Lease Summarization: upload PDF or JPG, or provide a JPG URL, and get a full-document summary after OCR extraction. Allows uploading a Word document with any content based on the summary and generates relevant output."""
@@ -652,6 +591,7 @@ def lease_summarization_ui(conn):
         st.error("Please provide either a file or a URL, not both.")
         return
     elif not uploaded_file and not image_url:
+        st.info("Please upload a file or enter a URL to proceed.")
         return
 
     # Determine input type
@@ -949,7 +889,25 @@ def lease_summarization_ui(conn):
             key="lease_export_word"
         )
 
-        if doc and 'last_docx_content' in st.session_state and 'last_docx_output' not in st.session_state:
+        # Additional Word document upload for processing
+        st.markdown("### 📝 Upload Additional Word Document")
+        docx_file = st.file_uploader(
+            "Upload a Word document with comments or instructions related to the lease summary (optional)",
+            type=["docx"],
+            key="lease_docx_uploader"
+        )
+
+        if docx_file:
+            try:
+                doc = Document(docx_file)
+                docx_content = "\n".join([p.text for p in doc.paragraphs if p.text.strip()])
+                st.session_state['last_docx_content'] = docx_content
+                st.success("Word document uploaded successfully!")
+                st.text_area("Uploaded Document Content", value=docx_content, height=200, key="docx_content_preview")
+            except Exception as e:
+                st.error(f"Failed to process Word document: {e}")
+
+        if 'last_docx_content' in st.session_state and docx_file:
             if st.button("Generate Response", key="lease_generate_response"):
                 with st.spinner("Generating response based on uploaded document..."):
                     prompt = (
@@ -970,6 +928,10 @@ def lease_summarization_ui(conn):
                     save_interaction(conn, "lease_docx_processing", st.session_state['last_docx_content'], response)
                     st.rerun()
 
+        # Display generated response if available
+        if 'last_docx_output' in st.session_state and docx_file:
+            st.subheader("Generated Response from Uploaded Document")
+            st.markdown(st.session_state['last_docx_output'])
 
 def deal_structuring_ui(conn):
     """Enhanced deal structuring with persistent strategy chat and detailed strategies."""
