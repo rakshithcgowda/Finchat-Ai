@@ -1,4 +1,3 @@
-%%writefile app.py
 import io
 import json
 import os
@@ -626,7 +625,7 @@ def extract_text_with_ocr(uploaded_file=None, file_type: str = "pdf", url: str =
 
 
 def lease_summarization_ui(conn):
-    """Lease Summarization: upload PDF or JPG, or provide a JPG URL, and get either full-document or page-by-page summaries after OCR extraction. Allows uploading a Word document with any content based on the summary and generates relevant output."""
+    """Lease Summarization: upload PDF or JPG, or provide a JPG URL, and get a full-document summary after OCR extraction. Allows uploading a Word document with any content based on the summary and generates relevant output."""
     st.header("📄 Lease Summary")
 
     # Clear previous summary and related data
@@ -637,7 +636,7 @@ def lease_summarization_ui(conn):
         st.rerun()
 
     st.markdown(
-        "Upload your lease PDF or JPG image, or provide a public JPG URL. Text will be extracted using OCR on a page-by-page basis. After extraction, choose to summarize the full document or page by page."
+        "Upload your lease PDF or JPG image, or provide a public JPG URL. Text will be extracted using OCR and summarized as a full document."
     )
 
     # File uploader for PDF or JPG
@@ -692,7 +691,7 @@ def lease_summarization_ui(conn):
 
             # Store extracted pages and input identifier
             st.session_state['extracted_pages'] = pages
-            st.session_state['used_ocr'] = True  # Always true as OCR is enforced
+            st.session_state['used_ocr'] = True
             if uploaded_file:
                 st.session_state['last_file'] = uploaded_file.name
             else:
@@ -722,119 +721,68 @@ def lease_summarization_ui(conn):
         else:
             st.warning(f"No text extracted for {selected_page}. Try a different file or check the document quality.")
 
-        # Summary mode selection after extraction
-        summary_mode = st.radio(
-            "Summary Mode",
-            ["Full Document", "Page-by-Page"],
-            index=0,
-            horizontal=True,
-            key="lease_summary_mode"
-        )
-
-        # Generate summary if extracted pages are available and button is clicked
+        # Generate full document summary
         if st.button("Generate Summary", key="lease_generate_button"):
             pages = st.session_state['extracted_pages']
             if not any(p.strip() for p in pages):
                 st.error("No readable text available for summarization.")
                 return
 
-            st.session_state['last_mode'] = summary_mode
             st.session_state['last_engine'] = ai_engine
 
-            if summary_mode == "Full Document":
-                text = "\n".join(pages)
-                with st.spinner("Summarizing full document..."):
-                    summaries = []
-                    chunks = [text[i:i+15000] for i in range(0, len(text), 15000)] if len(text) > 15000 else [text]
-                    for chunk in chunks:
-                        prompt = (
-                            "Summarize this portion of the lease agreement in clear, concise language, "
-                            "preserving all key details:\n\n" + chunk
-                        )
-                        summaries.append(call_mistral(
-                            messages=[{"role": "user", "content": prompt}],
-                            temperature=0.3,
-                            max_tokens=1024
-                        ))
-                    final = "\n\n".join(summaries)
-                st.subheader("Full Document Summary")
-                st.write(final)
-                save_interaction(conn, "lease_summary_full", input_identifier, final)
-                st.session_state['last_summary'] = final
-
-            else:
-                parts = []
-                st.subheader("Page-by-Page Summaries")
-                for i, pg in enumerate(pages, start=1):
-                    if not pg.strip():
-                        parts.append("(no text detected)")
-                        st.markdown(f"**Page {i}:** _(no text detected)_")
-                    else:
-                        with st.spinner(f"Summarizing page {i}..."):
-                            prompt = (
-                                f"Summarize page {i} of this lease agreement in clear, concise language, covering all information:\n\n{pg}"
-                            )
-                            summary = call_mistral(
-                                messages=[{"role": "user", "content": prompt}],
-                                temperature=0.3,
-                                max_tokens=512
-                            )
-                            st.markdown(f"**Page {i} Summary:**")
-                            st.write(summary)
-                            parts.append(summary)
-                save_interaction(conn, "lease_summary_pagewise", input_identifier, json.dumps({f"page_{i}": pages[i-1] for i in range(1, len(pages)+1)}))
-                st.session_state['last_summary'] = parts
-
+            text = "\n".join(pages)
+            with st.spinner("Summarizing full document..."):
+                summaries = []
+                chunks = [text[i:i+15000] for i in range(0, len(text), 15000)] if len(text) > 15000 else [text]
+                for chunk in chunks:
+                    prompt = (
+                        "Summarize this portion of the lease agreement in clear, concise language, "
+                        "preserving all key details:\n\n" + chunk
+                    )
+                    summaries.append(call_mistral(
+                        messages=[{"role": "user", "content": prompt}],
+                        temperature=0.3,
+                        max_tokens=1024
+                    ))
+                final = "\n\n".join(summaries)
+            st.subheader("Full Document Summary")
+            st.markdown(final)
+            save_interaction(conn, "lease_summary_full", input_identifier, final)
+            st.session_state['last_summary'] = final
             st.rerun()
 
     # Display existing summary if available
     if 'last_summary' in st.session_state and \
        ((uploaded_file and st.session_state.get('last_file') == uploaded_file.name) or \
         (image_url and st.session_state.get('last_url') == image_url)):
-        mode = st.session_state['last_mode']
         engine = st.session_state['last_engine']
-        raw = st.session_state['last_summary']
-        if mode == 'Full Document':
-            summary_content = raw
-            st.subheader(f"Full Document Summary ({engine})")
-            st.write(summary_content)
-        else:
-            parts = raw
-            st.subheader(f"Page-by-Page Summary ({engine})")
-            for idx, part in enumerate(parts, start=1):
-                st.markdown(f"**Page {idx}:**")
-                st.write(part)
-            summary_content = "\n\n".join(parts)
+        summary_content = st.session_state['last_summary']
+        st.subheader(f"Full Document Summary ({engine})")
+        st.markdown(summary_content)
         st.divider()
 
         # Export section
-        # Export section
-        # 📥 Export Styled Summary
         st.markdown("### 📥 Export Styled Summary")
 
-        # derive default filename
+        # Derive default filename
         file_base = input_identifier.rsplit(".", 1)[0]
         file_name = st.text_input("Filename (no extension):", value=file_base, key="lease_export_name")
 
-        # sanitize content
+        # Sanitize content
         safe_content = summary_content.encode('latin-1', 'replace').decode('latin-1')
-        paragraphs_pdf  = [p.strip() for p in safe_content.split("\n\n") if p.strip()]
+        paragraphs_pdf = [p.strip() for p in safe_content.split("\n\n") if p.strip()]
         paragraphs_word = [p.strip() for p in summary_content.split("\n\n") if p.strip()]
 
-        # ─── PDF EXPORT ────────────────────────────────────────────────────────────────
-        # ─── PDF EXPORT ────────────────────────────────────────────────────────────────
+        # PDF Export
         class LeasePDF(FPDF):
             def header(self):
-                # Title
                 self.set_font('Arial', 'B', 20)
-                self.set_text_color(30, 90, 140)  # Refined brand color
+                self.set_text_color(30, 90, 140)
                 self.cell(0, 12, "Lease Agreement Summary", ln=1, align='C')
-                # Date
                 self.set_font('Arial', 'I', 10)
-                self.set_text_color(120, 120, 120)  # Subtle gray
+                self.set_text_color(120, 120, 120)
                 date_str = datetime.now().strftime("%B %d, %Y")
                 self.cell(0, 6, date_str, ln=1, align='C')
-                # Divider
                 self.set_draw_color(200, 200, 200)
                 self.set_line_width(0.4)
                 y = self.get_y() + 2
@@ -850,10 +798,9 @@ def lease_summarization_ui(conn):
 
             def section_title(self, title):
                 self.set_font('Arial', 'B', 14)
-                self.set_fill_color(245, 245, 245)  # Light gray background
+                self.set_fill_color(245, 245, 245)
                 self.set_text_color(30, 90, 140)
                 self.cell(0, 8, title, ln=1, fill=True, border=0)
-                # Underline
                 x1, x2 = self.l_margin, self.w - self.r_margin
                 y = self.get_y() - 1
                 self.set_draw_color(30, 90, 140)
@@ -875,11 +822,9 @@ def lease_summarization_ui(conn):
                     if not line:
                         self.ln(4)
                         continue
-                    # Heading
                     if line.startswith("### "):
                         self.section_title(line[4:].strip())
                         continue
-                    # Bold label
                     m = re.match(r"\*\*(.+?)\*\*:", line)
                     if m:
                         self.set_font('Arial', 'B', 12)
@@ -887,7 +832,6 @@ def lease_summarization_ui(conn):
                         self.cell(0, 6, m.group(1) + ":", ln=1)
                         self.ln(2)
                         continue
-                    # Italic text
                     m = re.match(r"\*(.+?)\*", line)
                     if m:
                         self.set_font('Arial', 'I', 12)
@@ -897,7 +841,6 @@ def lease_summarization_ui(conn):
                         self.set_font('Arial', '', 12)
                         self.set_text_color(50, 50, 50)
                         continue
-                    # Numbered list
                     m = re.match(r"^(\d+)\.\s+(.*)", line)
                     if m:
                         num, text = m.groups()
@@ -909,7 +852,6 @@ def lease_summarization_ui(conn):
                         self.multi_cell(0, 7, text)
                         list_level = 1
                         continue
-                    # Bullet list
                     m = re.match(r"^\s*-\s+(.*)", line)
                     if m:
                         text = m.group(1)
@@ -920,17 +862,13 @@ def lease_summarization_ui(conn):
                         self.multi_cell(0, 7, text)
                         list_level = 1
                         continue
-                    # End list
                     if list_level and not (line.startswith("- ") or re.match(r"^\d+\.\s+", line)):
                         list_level = 0
                         self.ln(2)
-                    # Normal text
                     self.set_font('Arial', '', 12)
                     self.multi_cell(0, 7, line)
                     self.ln(2)
 
-
-        # Build PDF
         pdf = LeasePDF()
         pdf.set_auto_page_break(True, margin=20)
         pdf.add_page()
@@ -939,11 +877,10 @@ def lease_summarization_ui(conn):
         pdf.set_title(f"Lease Summary – {file_name}")
         pdf.set_author("Property Deals AI")
 
-        # Document Information Section
         pdf.section_title("Document Information")
         info = [
             ("Input File", input_identifier),
-            ("Mode", mode),
+            ("Mode", "Full Document"),
             ("AI Model", engine),
             ("Generated at", datetime.now().strftime("%Y-%m-%d %H:%M:%S")),
         ]
@@ -955,16 +892,9 @@ def lease_summarization_ui(conn):
             pdf.cell(0, 6, val.encode('latin-1', 'replace').decode('latin-1'), ln=1, fill=True)
         pdf.ln(6)
 
-        # Lease Summary Section
         pdf.section_title("Lease Summary")
-        if mode == 'Full Document':
-            pdf.render_summary_md(safe_content)
-        else:
-            for i, part in enumerate(parts, start=1):
-                pdf.section_title(f"Page {i} Summary")
-                pdf.render_summary_md(part)
+        pdf.render_summary_md(safe_content)
 
-        # Optional Additional Processing
         if st.session_state.get('last_docx_content'):
             pdf.add_page()
             pdf.section_title("Additional Processing")
@@ -976,7 +906,6 @@ def lease_summarization_ui(conn):
             pdf.cell(0, 6, "AI Summary Response:", ln=1)
             pdf.render_summary_md(st.session_state.get('last_docx_output', ''))
 
-        # Output PDF button
         try:
             pdf_bytes = pdf.output(dest='S').encode('latin-1', 'ignore')
             st.download_button(
@@ -988,30 +917,28 @@ def lease_summarization_ui(conn):
             )
         except Exception as e:
             st.error(f"PDF generation failed: {e}")
-        # ─── WORD EXPORT ───────────────────────────────────────────────────────────────
+
+        # Word Export
         doc = docx.Document()
-        # adjust page margins
         sections = doc.sections
         for sec in sections:
-            sec.top_margin    = docx.shared.Cm(2.5)
+            sec.top_margin = docx.shared.Cm(2.5)
             sec.bottom_margin = docx.shared.Cm(2.5)
-            sec.left_margin   = docx.shared.Cm(2.0)
-            sec.right_margin  = docx.shared.Cm(2.0)
+            sec.left_margin = docx.shared.Cm(2.0)
+            sec.right_margin = docx.shared.Cm(2.0)
 
-        # style heading
         doc.styles['Heading 1'].font.name = 'Calibri'
         doc.styles['Heading 1'].font.size = Pt(16)
-        doc.styles['Heading 1'].font.color.rgb = docx.shared.RGBColor(44,134,171)
+        doc.styles['Heading 1'].font.color.rgb = docx.shared.RGBColor(44, 134, 171)
         doc.styles['Normal'].font.name = 'Arial'
         doc.styles['Normal'].font.size = Pt(12)
 
         doc.add_heading("Lease Agreement Summary", level=1)
-        doc.add_paragraph(f"Mode: {mode}    AI Model: {engine}", style='Normal')
+        doc.add_paragraph(f"Mode: Full Document    AI Model: {engine}", style='Normal')
 
         for para in paragraphs_word:
             doc.add_paragraph(para, style='Normal')
 
-        # download button
         buf = io.BytesIO()
         doc.save(buf)
         st.download_button(
@@ -1021,7 +948,6 @@ def lease_summarization_ui(conn):
             mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
             key="lease_export_word"
         )
-
 
         if doc and 'last_docx_content' in st.session_state and 'last_docx_output' not in st.session_state:
             if st.button("Generate Response", key="lease_generate_response"):
@@ -1045,9 +971,8 @@ def lease_summarization_ui(conn):
                     st.rerun()
 
 
-
 def deal_structuring_ui(conn):
-    """Enhanced deal structuring with persistent strategy chat until cleared, using buyer and seller details."""
+    """Enhanced deal structuring with persistent strategy chat and detailed strategies."""
     st.header("💡 Creative Deal Structuring Bot")
     st.markdown("Get AI-powered strategies tailored to your property deal based on buyer and seller details.")
 
@@ -1055,18 +980,14 @@ def deal_structuring_ui(conn):
     if "deal_strategy_memory" not in st.session_state:
         st.session_state.deal_strategy_memory = []
         st.session_state.last_strategies = None
-        st.session_state.strategy_confidences = {}  # Track confidences per strategy
+        st.session_state.strategy_confidences = {}
 
-    # Clear chat
-    if st.button("Clear Strategies", key="clear_strategies"):
+    # Clear chat and strategies
+    if st.button("Clear Strategies & Chat", key="clear_strategies"):
         st.session_state.deal_strategy_memory.clear()
         st.session_state.last_strategies = None
         st.session_state.strategy_confidences = {}
         st.rerun()
-
-    # Replay chat history
-    for role, msg in st.session_state.deal_strategy_memory:
-        st.chat_message(role).write(msg)
 
     # Input form for Buyer and Seller details
     with st.expander("Deal Details", expanded=True):
@@ -1122,12 +1043,12 @@ def deal_structuring_ui(conn):
             f"- Property Type: {property_type}\n"
             f"- Occupancy Status: {occupancy_status}\n"
             f"- Property Condition & Repairs: {property_condition}\n\n"
-            f"Generate strategies for this real estate deal."
+            f"Generate detailed creative deal structuring strategies for this real estate deal. Provide multiple strategies, each with a clear title (e.g., 'Strategy 1: Title'), detailed description, pros, cons, and implementation steps."
         )
         with st.spinner("Developing strategies..."):
             messages = [
-                {"role": "system", "content": "You are a real estate investment strategist. Provide creative deal structuring options."},
-                {"role": "user",   "content": prompt}
+                {"role": "system", "content": "You are a real estate investment strategist. Provide detailed creative deal structuring options."},
+                {"role": "user", "content": prompt}
             ]
             strategies = call_mistral(messages=messages)
 
@@ -1138,35 +1059,38 @@ def deal_structuring_ui(conn):
         st.subheader("Recommended Strategies")
         st.markdown(strategies)
 
-        # Initialize confidences for each strategy
+        # Parse strategies for dropdown
         matches = re.findall(
-            r"Strategy\s+(\d+):\s*(.*?)(?=(?:Strategy\s+\d+:)|\Z)",
+            r"Strategy\s+(\d+):.*?\n(.*?)(?=(?:Strategy\s+\d+:)|\Z)",
             strategies,
-            flags=re.S
+            flags=re.DOTALL
         )
         if matches:
-            for num, _ in matches:
+            for num, text in matches:
                 strategy_key = f"Strategy {num}"
                 if strategy_key not in st.session_state.strategy_confidences:
-                    st.session_state.strategy_confidences[strategy_key] = 7  # Default confidence
+                    st.session_state.strategy_confidences[strategy_key] = 7
         else:
-            # Fallback if no numbered sections found
-            if "Strategy 1" not in st.session_state.strategy_confidences:
-                st.session_state.strategy_confidences["Strategy 1"] = 7
+            # Fallback if no numbered strategies found
+            strategy_key = "Strategy 1"
+            if strategy_key not in st.session_state.strategy_confidences:
+                st.session_state.strategy_confidences[strategy_key] = 7
+            matches = [("1", strategies)]
+
+        save_interaction(conn, "deal_strategy", prompt, strategies)
 
     # Strategy evaluation & refinement
     strategies = st.session_state.get("last_strategies")
     if strategies:
-        # Parse individual strategies by number
+        # Parse individual strategies
         matches = re.findall(
-            r"Strategy\s+(\d+):\s*(.*?)(?=(?:Strategy\s+\d+:)|\Z)",
+            r"Strategy\s+(\d+):.*?\n(.*?)(?=(?:Strategy\s+\d+:)|\Z)",
             strategies,
-            flags=re.S
+            flags=re.DOTALL
         )
         if matches:
             strategy_dict = {f"Strategy {num}": text.strip() for num, text in matches}
         else:
-            # Fallback if no numbered sections found
             strategy_dict = {"Strategy 1": strategies.strip()}
 
         labels = list(strategy_dict.keys())
@@ -1177,7 +1101,7 @@ def deal_structuring_ui(conn):
         st.markdown(f"**{selected_label}**")
         st.markdown(selected_text)
 
-        # Confidence slider - gets/sets value from session state
+        # Confidence slider
         confidence = st.slider(
             "Confidence in this strategy",
             1, 10,
@@ -1199,13 +1123,38 @@ def deal_structuring_ui(conn):
             )
             messages = [
                 {"role": "system", "content": "Refine the selected strategy based on user feedback."},
-                {"role": "user",   "content": refinement_prompt}
+                {"role": "user", "content": refinement_prompt}
             ]
             refinement = call_mistral(messages=messages)
 
             st.session_state.deal_strategy_memory.append(("assistant", refinement))
             st.chat_message("assistant").write(refinement)
             save_interaction(conn, "deal_strategy_refinement", selected_text, refinement)
+
+        # Chatbot integration
+        st.divider()
+        st.subheader("Chat About Strategies")
+        if "strategy_chat_memory" not in st.session_state:
+            st.session_state.strategy_chat_memory = []
+
+        # Display chat history
+        for role, message in st.session_state.strategy_chat_memory:
+            st.chat_message(role).write(message)
+
+        # Chat input
+        user_input = st.chat_input("Ask a question about the strategies...")
+        if user_input:
+            st.session_state.strategy_chat_memory.append(("user", user_input))
+            context = f"Strategies:\n{strategies}\n\nUser Question:\n{user_input}"
+            messages = [
+                {"role": "system", "content": "You are a real estate strategist answering questions about deal structuring strategies."},
+                {"role": "user", "content": context}
+            ]
+            answer = call_mistral(messages=messages)
+            st.session_state.strategy_chat_memory.append(("assistant", answer))
+            st.chat_message("assistant").write(answer)
+            save_interaction(conn, "deal_strategy_chat", user_input, answer)
+
 
 def build_guided_prompt(details: dict, detail_level: str) -> str:
     """
@@ -1243,6 +1192,66 @@ def build_guided_prompt(details: dict, detail_level: str) -> str:
 
     offers_str = "\n".join(
         [f"- Offer {i+1}: £{offer}" for i, offer in enumerate(offers)]
+    ) if offers else "No offers provided."
+
+    sections = [
+        "Generate a professional real estate purchase agreement with the following details:",
+        f"- Vendor Name: {vendor_name}",
+        f"- Vendor Situation: {vendor_situation}",
+        f"- Property Condition: {property_condition}",
+        f"- Other Challenges: {other_challenges}" if other_challenges else "",
+        f"- Family Member & Situation: {family_member} - {family_situation}" if family_member and family_situation else "",
+        f"- Local Knowledge: {local_knowledge}",
+        f"- Comparables:\n{comparables_str}",
+        f"- Average Sale Price: £{avg_sale_price}",
+        f"- Required Profit (15%): £{required_profit}",
+        f"- Reason for Profit: {profit_reason}",
+        f"- Detailed Costs:\n{costs_str}",
+        f"- Potential Negative Points: {negative_points}" if negative_points else "",
+        f"- Proposed Offers:\n{offers_str}",
+        f"- Social Proof: {social_proof}" if social_proof else "",
+        f"- Proof of Funds: {proof_of_funds}" if proof_of_funds else "",
+        f"Level of Detail: {detail_level}.",
+        "Format the output as an empathetic offer letter, starting with an acknowledgment of the vendor's situation, expressing willingness to help, and thanking them for their time. Highlight the property and locality positively. Include headings and bold key points as per the provided example. Include incentives like covering legal costs, no estate agent fees, and benefits of a Purchase Lease Option and Exchange with Delayed Completion. Suggest next steps, such as preparing a Heads of Terms document."
+    ]
+    return "\n".join([s for s in sections if s])
+
+def build_guided_prompt(details: dict, detail_level: str) -> str:
+    """
+    Construct a detailed prompt from guided form data to generate a real estate purchase agreement.
+    """
+    vendor_name = details['vendor']['name']
+    vendor_situation = details['vendor']['situation']
+    property_condition = details['vendor']['condition']
+    other_challenges = details['vendor'].get('challenges', '')
+    family_member = details['vendor'].get('family_member', '')
+    family_situation = details['vendor'].get('family_situation', '')
+
+    local_knowledge = details['local_knowledge']['experience']
+    comparables = details['local_knowledge']['comparables']
+    avg_sale_price = details['local_knowledge']['avg_sale_price']
+    required_profit = details['local_knowledge']['required_profit']
+    profit_reason = details['local_knowledge']['profit_reason']
+
+    costs = details['costs']
+    total_cost = sum(costs.values())
+
+    negative_points = details.get('negative_points', '')
+    offers = details['offers']
+
+    social_proof = details.get('social_proof', '')
+    proof_of_funds = details.get('proof_of_funds', '')
+
+    comparables_str = "\n".join(
+        [f"- {comp['address']}: {comp['status']} at £{comp['price']}" for comp in comparables]
+    ) if comparables else "No comparables provided."
+
+    costs_str = "\n".join(
+        [f"- {key}: £{value}" for key, value in costs.items()]
+    ) + f"\n- Total: £{total_cost}"
+
+    offers_str = "\n".join(
+        [f"- Offer {i+1}: £{offer['amount']} ({offer['description']})" for i, offer in enumerate(offers)]
     ) if offers else "No offers provided."
 
     sections = [
@@ -1397,8 +1406,13 @@ def offer_generator_ui(conn):
                 st.markdown('#### Proposed Offers')
                 offers = []
                 for i in range(3):
-                    offer = st.number_input(f"Offer {i+1} (£)*", min_value=0.0, step=1000.0, key=f"offer_{i}")
-                    offers.append(offer)
+                    st.markdown(f"**Offer {i+1}**")
+                    col1, col2 = st.columns(2)
+                    with col1:
+                        amount = st.number_input(f"Offer {i+1} Amount (£)*", min_value=0.0, step=1000.0, key=f"offer_amount_{i}")
+                    with col2:
+                        description = st.text_input(f"Offer {i+1} Description*", placeholder="e.g., Cash offer with quick close", key=f"offer_desc_{i}")
+                    offers.append({"amount": amount, "description": description})
 
                 st.markdown('#### Social Proof & Proof of Funds')
                 social_proof = st.text_input("Google Reviews Link", key="social_proof")
@@ -1423,8 +1437,8 @@ def offer_generator_ui(conn):
                     for i in range(3):
                         if not st.session_state.get(f"comp_address_{i}") or not st.session_state.get(f"comp_status_{i}") or not st.session_state.get(f"comp_price_{i}"):
                             missing.append(f"Comparable {i+1} details required")
-                        if not st.session_state.get(f"offer_{i}"):
-                            missing.append(f"Offer {i+1} required")
+                        if not st.session_state.get(f"offer_amount_{i}") or not st.session_state.get(f"offer_desc_{i}"):
+                            missing.append(f"Offer {i+1} amount and description required")
                     if missing:
                         for m in missing:
                             st.error(m)
@@ -1642,10 +1656,10 @@ def offer_generator_ui(conn):
             st.rerun()
 # ─── Admin Portal ──────────────────────────────────────────────────────────────
 def admin_portal_ui(conn):
-    """Enhanced admin portal with usage analytics and subscription management"""
+    """Enhanced admin portal with usage analytics, subscription management, and prompt viewer"""
     st.header("🔒 Admin Portal")
 
-    tab1, tab2, tab3, tab4 = st.tabs(["User Management", "Subscription Management", "Content Management", "Usage Analytics"])
+    tab1, tab2, tab3, tab4, tab5 = st.tabs(["User Management", "Subscription Management", "Content Management", "Usage Analytics", "Prompt Viewer"])
 
     with tab1:
         st.subheader("User Accounts")
@@ -1711,7 +1725,6 @@ def admin_portal_ui(conn):
 
     with tab2:
         st.subheader("Feature Access Control")
-
         users = conn.execute("SELECT username FROM users").fetchall()
         if not users:
             st.warning("No users found")
@@ -1830,6 +1843,27 @@ def admin_portal_ui(conn):
         else:
             st.warning("No user activity data available")
 
+    with tab5:
+        st.subheader("Prompt Viewer")
+        users = conn.execute("SELECT username FROM users").fetchall()
+        if not users:
+            st.warning("No users found")
+        else:
+            selected_user = st.selectbox("Select User to View Prompts", [u[0] for u in users], key="prompt_user_select")
+            interactions = conn.execute(
+                "SELECT timestamp, feature, input_text, output_text "
+                "FROM interactions WHERE username = ? ORDER BY timestamp DESC",
+                (selected_user,)
+            ).fetchall()
+            if not interactions:
+                st.info(f"No interactions found for {selected_user}")
+            else:
+                for ts, feature, input_text, output_text in interactions:
+                    with st.expander(f"{ts} • {feature}"):
+                        st.markdown("**Prompt/Input**")
+                        st.text_area("Input", input_text, height=200, key=f"prompt_input_{ts}_{feature}")
+                        st.markdown("**Response**")
+                        st.text_area("Output", output_text, height=200, key=f"prompt_output_{ts}_{feature}")
 # ─── History View ──────────────────────────────────────────────────────────────
 def history_ui(conn):
     """Show user's interaction history"""
@@ -2048,31 +2082,71 @@ def main():
 
     # Apply brand styling
     st.markdown(
-        f"""
+        """
         <style>
-            .main {{
-                background-color: {BRAND_COLORS['background']};
-            }}
-            .sidebar .sidebar-content {{
-                background-color: {BRAND_COLORS['primary']} !important;
-                color: white;
-            }}
-            h1, h2, h3 {{
-                color: {BRAND_COLORS['primary']};
-            }}
-            .stButton>button {{
-                background-color: {BRAND_COLORS['secondary']};
-                color: white;
-            }}
-            .stTextInput>div>div>input,
-            .stTextArea>div>div>textarea {{
-                background-color: black !important;
-                color: white !important;
-            }}
+        /* Container around each input section */
+        .auction-section {
+          background-color: #f0f2f6;
+          border-radius: 12px;
+          padding: 20px;
+          margin-bottom: 20px;
+          box-shadow: 0 2px 8px rgba(0,0,0,0.05);
+        }
+
+        /* Section headings */
+        .auction-section h2,
+        .auction-section h3 {
+          color: #2E86AB;
+          margin-bottom: 12px;
+          font-weight: 600;
+        }
+
+        /* Labels and select boxes */
+        .auction-section .stSelectbox, 
+        .auction-section .stTextArea, 
+        .auction-section .stTextInput,
+        .auction-section .stNumberInput {
+          background-color: #ffffff !important;
+          border: 1px solid #d1d5db !important;
+          border-radius: 6px !important;
+          padding: 8px !important;
+        }
+
+        /* Primary buttons */
+        .auction-button, 
+        .stButton>button {
+          background-color: #F18F01 !important;
+          color: white !important;
+          border-radius: 8px !important;
+          padding: 8px 16px !important;
+          font-weight: 500 !important;
+        }
+        .stButton>button:hover {
+          background-color: #d67a00 !important;
+        }
+
+        /* Slider styling */
+        .auction-section .stSlider > div:nth-child(1) {
+          color: #2E86AB;
+        }
+
+        /* Chat history boxes */
+        .st-chat-message {
+          border-radius: 8px !important;
+          padding: 12px !important;
+          margin-bottom: 8px !important;
+        }
+        .st-chat-message.user {
+          background-color: #e8f1fb !important;
+        }
+        .st-chat-message.assistant {
+          background-color: #f7f7f7 !important;
+        }
         </style>
         """,
-        unsafe_allow_html=True
+        unsafe_allow_html=True,
     )
+
 
     # Initialize database
     try:
