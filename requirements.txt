@@ -34,3 +34,4 @@ mistralai
 openai
 plotly
 pandas
+supabase
