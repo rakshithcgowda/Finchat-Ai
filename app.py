@@ -29,6 +29,27 @@ from docx import Document
 import logging
 import sqlite3
 from contextlib import contextmanager
+import supabase
+import psycopg2
+
+
+# Configure logging
+logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
+
+# Supabase configuration (store in Streamlit secrets)
+SUPABASE_URL = os.environ.get("SUPABASE_URL", "https://kxnwdinffjuetqhwmyav.supabase.co")
+SUPABASE_KEY = os.environ.get("SUPABASE_KEY", "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Imt4bndkaW5mZmp1ZXRxaHdteWF2Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NTA0NDM0MDUsImV4cCI6MjA2NjAxOTQwNX0.xxtKKy8saZWqa6nb4ABf77AUcZvY-qZG-a7SVMJOjv0")
+supabase_client = supabase.create_client(SUPABASE_URL, SUPABASE_KEY)
+
+# Database configuration for direct psycopg2 connection (for complex queries)
+DB_CONFIG = {
+    "dbname": os.environ.get("DB_NAME", "postgres"),
+    "user": os.environ.get("DB_USER", "postgres"),
+    "password": os.environ.get("DB_PASSWORD"),
+    "host": os.environ.get("DB_HOST", "db.kxnwdinffjuetqhwmyav.supabase.co"),
+    "port": os.environ.get("DB_PORT", "5432")
+}
+
 
 # ─── Configuration ──────────────────────────────────────────────────────────────
 GOOGLE_API_KEY = os.environ.get(
@@ -172,13 +193,13 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(
 
 # Database context manager
 @contextmanager
-def get_db_connection(db_path: str = DB_PATH):
+def get_db_connection():
     conn = None
     try:
-        conn = sqlite3.connect(db_path, check_same_thread=False)
-        conn.row_factory = sqlite3.Row
+        conn = psycopg2.connect(**DB_CONFIG)
+        conn.autocommit = False
         yield conn
-    except sqlite3.Error as e:
+    except psycopg2.Error as e:
         logging.error(f"Database connection error: {e}")
         raise
     finally:
@@ -186,86 +207,63 @@ def get_db_connection(db_path: str = DB_PATH):
             conn.close()
 
 # Initialize database
-def init_db(db_path: str = DB_PATH):
-    """
-    Initialize the database only if it doesn't exist.
-    Creates necessary tables and ensures schema updates are non-destructive.
-    Returns a database connection.
-    """
-    db_exists = os.path.exists(db_path)
-    conn = sqlite3.connect(db_path, check_same_thread=False)
-    conn.row_factory = sqlite3.Row
-
+def init_db():
     try:
-        cursor = conn.cursor()
-        cursor.execute("""
-            CREATE TABLE IF NOT EXISTS users (
-                username TEXT PRIMARY KEY,
-                password BLOB NOT NULL,
-                role TEXT NOT NULL,
-                location_id TEXT,
-                last_login TIMESTAMP,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )
-        """)
-        cursor.execute("PRAGMA table_info(users)")
-        existing_cols = {col[1] for col in cursor.fetchall()}
-        for col, col_type in [
-            ("location_id", "TEXT"),
-            ("last_login", "TIMESTAMP"),
-            ("created_at", "TIMESTAMP DEFAULT CURRENT_TIMESTAMP")
-        ]:
-            if col not in existing_cols:
-                try:
-                    cursor.execute(f"ALTER TABLE users ADD COLUMN {col} {col_type}")
-                    logging.info(f"Added {col} column to users table")
-                except sqlite3.OperationalError as e:
-                    logging.warning(f"Could not add {col} column: {e}")
+        with get_db_connection() as conn:
+            cursor = conn.cursor()
+            # Create tables if they don't exist
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS users (
+                    username TEXT PRIMARY KEY,
+                    password BYTEA NOT NULL,
+                    role TEXT NOT NULL,
+                    location_id TEXT,
+                    last_login TIMESTAMP,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS subscriptions (
+                    username TEXT PRIMARY KEY,
+                    lease_analysis INTEGER DEFAULT 0,
+                    deal_structuring INTEGER DEFAULT 0,
+                    offer_generator INTEGER DEFAULT 0,
+                    FOREIGN KEY(username) REFERENCES users(username)
+                )
+            """)
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS interactions (
+                    id SERIAL PRIMARY KEY,
+                    username TEXT,
+                    feature TEXT,
+                    input_text TEXT,
+                    output_text TEXT,
+                    timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY(username) REFERENCES users(username)
+                )
+            """)
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS prompts (
+                    id SERIAL PRIMARY KEY,
+                    feature TEXT UNIQUE,
+                    system_prompt TEXT NOT NULL,
+                    user_prompt_template TEXT NOT NULL,
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
+            conn.commit()
 
-        cursor.execute("""
-            CREATE TABLE IF NOT EXISTS subscriptions (
-                username TEXT PRIMARY KEY,
-                lease_analysis INTEGER DEFAULT 0,
-                deal_structuring INTEGER DEFAULT 0,
-                offer_generator INTEGER DEFAULT 0,
-                FOREIGN KEY(username) REFERENCES users(username)
-            )
-        """)
-        cursor.execute("""
-            CREATE TABLE IF NOT EXISTS interactions (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                username TEXT,
-                feature TEXT,
-                input_text TEXT,
-                output_text TEXT,
-                timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                FOREIGN KEY(username) REFERENCES users(username)
-            )
-        """)
-        cursor.execute("""
-            CREATE TABLE IF NOT EXISTS prompts (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                feature TEXT UNIQUE,
-                system_prompt TEXT NOT NULL,
-                user_prompt_template TEXT NOT NULL,
-                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )
-        """)
-        conn.commit()
-
-        if not db_exists:
-            create_default_admin(conn)
-            initialize_default_prompts(conn)
-
-        return conn
-    except sqlite3.Error as e:
+            # Check if database is empty and create default admin
+            cursor.execute("SELECT COUNT(*) FROM users")
+            if cursor.fetchone()[0] == 0:
+                create_default_admin(conn)
+                initialize_default_prompts(conn)
+    except psycopg2.Error as e:
         logging.error(f"Database initialization failed: {e}")
         st.error(f"Failed to initialize database: {e}")
-        conn.close()
         raise
 
 def initialize_default_prompts(conn):
-    """Initialize default prompts if they don't exist"""
     default_prompts = {
         "lease_analysis": {
             "system_prompt": "You are a real estate document expert. Analyze the provided lease agreement and provide a comprehensive summary, including key terms and potential risks.",
@@ -280,35 +278,35 @@ def initialize_default_prompts(conn):
             "user_prompt_template": "Generate a purchase offer based on these details:\n\n{details}"
         }
     }
-    
-    cursor = conn.cursor()
-    for feature, prompts in default_prompts.items():
-        cursor.execute("SELECT 1 FROM prompts WHERE feature = ?", (feature,))
-        if not cursor.fetchone():
-            cursor.execute(
-                "INSERT INTO prompts (feature, system_prompt, user_prompt_template) VALUES (?, ?, ?)",
-                (feature, prompts["system_prompt"], prompts["user_prompt_template"])
-            )
-    conn.commit()
-
-def create_default_admin(conn):
-    """Create a default admin user if none exists."""
     try:
         cursor = conn.cursor()
-        cursor.execute("SELECT COUNT(*) FROM users")
-        if cursor.fetchone()[0] == 0:
-            admin_pwd = bcrypt.hashpw("admin123".encode(), bcrypt.gensalt())
-            cursor.execute(
-                "INSERT INTO users (username, password, role) VALUES (?, ?, ?)",
-                ("admin", admin_pwd, "admin")
-            )
-            cursor.execute(
-                "INSERT INTO subscriptions (username, lease_analysis, deal_structuring, offer_generator) VALUES (?, ?, ?, ?)",
-                ("admin", 1, 1, 1)
-            )
-            conn.commit()
-            logging.info("Default admin user created")
-    except sqlite3.Error as e:
+        for feature, prompts in default_prompts.items():
+            cursor.execute("SELECT 1 FROM prompts WHERE feature = %s", (feature,))
+            if not cursor.fetchone():
+                cursor.execute(
+                    "INSERT INTO prompts (feature, system_prompt, user_prompt_template) VALUES (%s, %s, %s)",
+                    (feature, prompts["system_prompt"], prompts["user_prompt_template"])
+                )
+        conn.commit()
+    except psycopg2.Error as e:
+        logging.error(f"Failed to initialize prompts: {e}")
+        raise
+
+def create_default_admin(conn):
+    try:
+        cursor = conn.cursor()
+        admin_pwd = bcrypt.hashpw("admin123".encode(), bcrypt.gensalt())
+        cursor.execute(
+            "INSERT INTO users (username, password, role) VALUES (%s, %s, %s) ON CONFLICT DO NOTHING",
+            ("admin", admin_pwd, "admin")
+        )
+        cursor.execute(
+            "INSERT INTO subscriptions (username, lease_analysis, deal_structuring, offer_generator) VALUES (%s, %s, %s, %s) ON CONFLICT DO NOTHING",
+            ("admin", 1, 1, 1)
+        )
+        conn.commit()
+        logging.info("Default admin user created")
+    except psycopg2.Error as e:
         logging.error(f"Failed to create default admin: {e}")
         raise
 
@@ -317,18 +315,21 @@ def verify_password(hashed: bytes, password: str) -> bool:
 
 # ─── AI Helper Functions ───────────────────────────────────────────────────────
 def get_feature_prompt(conn, feature: str, input_text: str) -> tuple:
-    """Get the system and user prompts for a specific feature"""
-    cursor = conn.cursor()
-    cursor.execute(
-        "SELECT system_prompt, user_prompt_template FROM prompts WHERE feature = ?",
-        (feature,)
-    )
-    prompt = cursor.fetchone()
-    if prompt:
-        system_prompt = prompt[0]
-        user_prompt = prompt[1].format(text=input_text)
-        return system_prompt, user_prompt
-    return None, None
+    try:
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT system_prompt, user_prompt_template FROM prompts WHERE feature = %s",
+            (feature,)
+        )
+        prompt = cursor.fetchone()
+        if prompt:
+            system_prompt = prompt[0]
+            user_prompt = prompt[1].format(text=input_text)
+            return system_prompt, user_prompt
+        return None, None
+    except psycopg2.Error as e:
+        logging.error(f"Failed to get feature prompt: {e}")
+        return None, None
 
 def call_gemini(
     feature: str,
@@ -417,11 +418,15 @@ def call_deepseek(
 
 def save_interaction(conn, feature, input_text, output_text):
     if st.session_state.get("username"):
-        conn.execute(
-            "INSERT INTO interactions (username, feature, input_text, output_text) VALUES (?, ?, ?, ?)",
-            (st.session_state.username, feature, input_text, output_text),
-        )
-        conn.commit()
+        try:
+            cursor = conn.cursor()
+            cursor.execute(
+                "INSERT INTO interactions (username, feature, input_text, output_text) VALUES (%s, %s, %s, %s)",
+                (st.session_state.username, feature, input_text, output_text)
+            )
+            conn.commit()
+        except psycopg2.Error as e:
+            logging.error(f"Failed to save interaction: {e}")
 
 def extract_text_with_ocr(uploaded_file=None, file_type: str = "pdf", url: str = None):
     """Enhanced text extraction with OCR.space API for PDFs and images."""
@@ -1803,17 +1808,13 @@ def chatbot_ui(conn):
 # Registration UI
 def register_ui(conn):
     st.title("📝 Register")
-    st.markdown("Create a new account.")
-
     with st.form("register_form"):
         username = st.text_input("Username", placeholder="Enter your username")
         password = st.text_input("Password", type="password", placeholder="Enter your password")
         confirm_password = st.text_input("Confirm Password", type="password", placeholder="Confirm your password")
         location_id = st.text_input("Location ID (optional)", placeholder="Enter location ID if applicable")
         submitted = st.form_submit_button("Register")
-
         if submitted:
-            # Input validation
             if not username or not password or not confirm_password:
                 st.error("All required fields must be filled.")
                 return
@@ -1826,78 +1827,65 @@ def register_ui(conn):
             if not re.match(r"^[a-zA-Z0-9_]+$", username):
                 st.error("Username can only contain letters, numbers, and underscores.")
                 return
-
-            # Check for existing username
-            cursor = conn.cursor()
-            cursor.execute("SELECT username FROM users WHERE username = ?", (username,))
-            if cursor.fetchone():
-                st.error("Username already exists. Please choose a different username.")
-                return
-
-            # Register user
             try:
+                cursor = conn.cursor()
+                cursor.execute("SELECT username FROM users WHERE username = %s", (username,))
+                if cursor.fetchone():
+                    st.error("Username already exists. Please choose a different username.")
+                    return
                 hashed = bcrypt.hashpw(password.encode(), bcrypt.gensalt())
                 cursor.execute(
-                    "INSERT INTO users (username, password, role, location_id, created_at) VALUES (?, ?, ?, ?, ?)",
+                    "INSERT INTO users (username, password, role, location_id, created_at) VALUES (%s, %s, %s, %s, %s)",
                     (username, hashed, "user", location_id or None, datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
                 )
                 cursor.execute(
-                    "INSERT INTO subscriptions (username, lease_analysis, deal_structuring, offer_generator) VALUES (?, ?, ?, ?)",
+                    "INSERT INTO subscriptions (username, lease_analysis, deal_structuring, offer_generator) VALUES (%s, %s, %s, %s)",
                     (username, 0, 0, 0)
                 )
                 conn.commit()
                 st.success("Registration successful! You can now log in.")
                 logging.info(f"User {username} registered successfully")
-            except sqlite3.Error as e:
+            except psycopg2.Error as e:
                 st.error(f"Registration failed: {e}")
                 logging.error(f"Registration failed for {username}: {e}")
 
 def login_ui(conn):
-    """Handle user login and registration with tabbed interface"""
     st.title("🔐 Property Deals AI")
-    st.markdown("Access or create your account to use the platform.")
-
-    # Create tabs for Login and Register
     login_tab, register_tab = st.tabs(["Login", "Register"])
-
     with login_tab:
         st.markdown("### Log In")
         with st.form("login_form"):
             username = st.text_input("Username", key="login_username")
             password = st.text_input("Password", type="password", key="login_password")
             submitted = st.form_submit_button("Login")
-
             if submitted:
                 if not username or not password:
                     st.error("Please provide both username and password.")
                     return
-
-                cursor = conn.cursor()
-                cursor.execute(
-                    "SELECT password, role, location_id FROM users WHERE username = ?",
-                    (username,)
-                )
-                user = cursor.fetchone()
-
-                if user and verify_password(user[0], password):
-                    st.session_state.logged_in = True
-                    st.session_state.username = username
-                    st.session_state.role = user[1]
-                    st.session_state.location_id = user[2] if user[2] else None
-
-                    # Update last login timestamp
+                try:
+                    cursor = conn.cursor()
                     cursor.execute(
-                        "UPDATE users SET last_login = ? WHERE username = ?",
-                        (datetime.now().strftime("%Y-%m-%d %H:%M:%S"), username)
+                        "SELECT password, role, location_id FROM users WHERE username = %s",
+                        (username,)
                     )
-                    conn.commit()
-
-                    st.success(f"Welcome, {username}!")
-                    time.sleep(1)
-                    st.rerun()
-                else:
-                    st.error("Invalid username or password.")
-
+                    user = cursor.fetchone()
+                    if user and verify_password(user[0], password):
+                        st.session_state.logged_in = True
+                        st.session_state.username = username
+                        st.session_state.role = user[1]
+                        st.session_state.location_id = user[2] if user[2] else None
+                        cursor.execute(
+                            "UPDATE users SET last_login = %s WHERE username = %s",
+                            (datetime.now().strftime("%Y-%m-%d %H:%M:%S"), username)
+                        )
+                        conn.commit()
+                        st.success(f"Welcome, {username}!")
+                        time.sleep(1)
+                        st.rerun()
+                    else:
+                        st.error("Invalid username or password.")
+                except psycopg2.Error as e:
+                    st.error(f"Login failed: {e}")
     with register_tab:
         register_ui(conn)
 
@@ -1911,7 +1899,7 @@ def main():
         initial_sidebar_state="expanded"
     )
 
-    # Apply brand styling
+    # Apply brand styling (unchanged)
     st.markdown(
         """
         <style>
@@ -1978,11 +1966,9 @@ def main():
         unsafe_allow_html=True,
     )
 
-
-    # Initialize database
+    # Initialize database (PostgreSQL)
     try:
-        conn = init_db(DB_PATH)
-        conn.close()  # Close initial connection after initialization
+        init_db()  # No need to close connection as init_db uses context manager
     except Exception as e:
         st.error(f"Failed to initialize application: {e}")
         return
@@ -2002,22 +1988,24 @@ def main():
 
     # Authentication flow
     if not st.session_state.logged_in:
-        with get_db_connection(DB_PATH) as conn:
+        with get_db_connection() as conn:
             login_ui(conn)
         return
 
     # After login check, get user's subscription status
     if st.session_state.logged_in:
         try:
-            with get_db_connection(DB_PATH) as conn:
-                sub = conn.execute(
-                    "SELECT lease_analysis, deal_structuring, offer_generator FROM subscriptions WHERE username = ?",
+            with get_db_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute(
+                    "SELECT lease_analysis, deal_structuring, offer_generator FROM subscriptions WHERE username = %s",
                     (st.session_state.username,)
-                ).fetchone()
+                )
+                sub = cursor.fetchone()
 
                 if not sub and st.session_state.role != "admin":
-                    conn.execute(
-                        "INSERT INTO subscriptions (username) VALUES (?)",
+                    cursor.execute(
+                        "INSERT INTO subscriptions (username) VALUES (%s)",
                         (st.session_state.username,)
                     )
                     conn.commit()
@@ -2030,11 +2018,11 @@ def main():
                     "deal_structuring": bool(sub[1]),
                     "offer_generator": bool(sub[2])
                 }
-        except sqlite3.Error as e:
+        except psycopg2.Error as e:
             st.error(f"Error fetching subscription status: {e}")
             return
 
-    # Sidebar navigation - only show accessible features
+    # Sidebar navigation - only show accessible features (unchanged)
     st.sidebar.title(f"Welcome, {st.session_state.username}")
     st.sidebar.markdown(f"**Location ID:** {st.session_state.get('location_id', 'Not specified')}")
 
@@ -2054,7 +2042,7 @@ def main():
 
     # Main content
     try:
-        with get_db_connection(DB_PATH) as conn:
+        with get_db_connection() as conn:
             if selected == "LeaseBrief Buddy":
                 lease_summarization_ui(conn)
             elif selected == "Auction Buddy":
@@ -2075,12 +2063,12 @@ def main():
     # Divider and chatbot helper
     st.divider()
     try:
-        with get_db_connection(DB_PATH) as conn:
+        with get_db_connection() as conn:
             chatbot_ui(conn)
     except Exception as e:
         st.error(f"Error in chatbot: {e}")
 
-    # Logout
+    # Logout (unchanged)
     st.sidebar.divider()
     if st.sidebar.button("Logout"):
         for key in list(st.session_state.keys()):
