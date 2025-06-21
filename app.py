@@ -1,3 +1,4 @@
+import os
 import io
 import json
 import os
@@ -1056,15 +1057,18 @@ def offer_generator_ui(conn):
         """, unsafe_allow_html=True
     )
 
+    # Initialize session state for Offer Buddy
     if 'offer_stage' not in st.session_state:
         st.session_state.update({
-            'offer_stage': 'input_method',
+            'offer_stage': 'details_entry',  # Ensure default stage is details_entry
             'offer_data': {},
             'generated_offer': None,
             'edited_offer': None,
-            'review_comments': []
+            'review_comments': [],
+            'form_submitted': False  # Track form submission state
         })
 
+    # Navigation tabs for stages
     stages = ["details_entry", "offer_generation", "review_edit", "export"]
     labels = ["Details Entry", "Offer Generation", "Review & Edit", "Export"]
     idx = stages.index(st.session_state.offer_stage) if st.session_state.offer_stage in stages else 0
@@ -1081,66 +1085,67 @@ def offer_generator_ui(conn):
     # Stage 1: Details Entry
     if st.session_state.offer_stage == 'details_entry':
         st.markdown("### 1. Enter Offer Details")
-        with st.form("offer_details_form"):
+        # Use a unique key for the form to prevent state conflicts
+        with st.form("offer_details_form", clear_on_submit=False):
             st.markdown('<div class="offer-section">', unsafe_allow_html=True)
             st.markdown('#### Vendor Details')
-            vendor_name = st.text_input("Vendor Name*", key="vendor_name")
-            vendor_situation = st.text_area("Vendor Situation*", placeholder="e.g., relocating, financial distress", key="vendor_situation")
-            property_condition = st.text_area("Property Condition*", placeholder="e.g., needs roof replacement", key="property_condition")
-            other_challenges = st.text_area("Other Challenges", placeholder="e.g., planning issues, structural concerns", key="other_challenges")
-            family_member = st.text_input("Family Member Name", key="family_member")
-            family_situation = st.text_area("Family Member Situation", placeholder="e.g., elderly parent needing care", key="family_situation")
+            vendor_name = st.text_input("Vendor Name*", key="vendor_name_input", placeholder="Enter vendor name")
+            vendor_situation = st.text_area("Vendor Situation*", key="vendor_situation_input", placeholder="e.g., relocating, financial distress")
+            property_condition = st.text_area("Property Condition*", key="property_condition_input", placeholder="e.g., needs roof replacement")
+            other_challenges = st.text_area("Other Challenges", key="other_challenges_input", placeholder="e.g., planning issues, structural concerns")
+            family_member = st.text_input("Family Member Name", key="family_member_input")
+            family_situation = st.text_area("Family Member Situation", key="family_situation_input", placeholder="e.g., elderly parent needing care")
 
             st.markdown('#### Local Knowledge & Comparables')
-            local_experience = st.text_area("Local Investment Experience*", placeholder="e.g., I have been investing in [Local Area] for several years, successfully completing [X] deals in the last [Y] months.", key="local_experience")
+            local_experience = st.text_area("Local Investment Experience*", key="local_experience_input", placeholder="e.g., I have been investing in [Local Area] for several years")
             st.markdown("**Recent Comparables**")
             comparables = []
             for i in range(3):
                 st.markdown(f"**Comparable {i+1}**")
                 col1, col2, col3 = st.columns(3)
                 with col1:
-                    address = st.text_input(f"Property Address {i+1}*", key=f"comp_address_{i}")
+                    address = st.text_input(f"Property Address {i+1}*", key=f"comp_address_{i}_input")
                 with col2:
-                    status = st.selectbox(f"Status {i+1}*", ["Sold", "Under Offer", "SSTC"], key=f"comp_status_{i}")
+                    status = st.selectbox(f"Status {i+1}*", ["Sold", "Under Offer", "SSTC"], key=f"comp_status_{i}_input")
                 with col3:
-                    price = st.number_input(f"Price {i+1}* (£)", min_value=0.0, step=1000.0, key=f"comp_price_{i}")
+                    price = st.number_input(f"Price {i+1}* (£)", min_value=0.0, step=1000.0, key=f"comp_price_{i}_input")
                 comparables.append({"address": address, "status": status, "price": price})
-            avg_sale_price = st.number_input("Average Sale Price* (£)", min_value=0.0, step=1000.0, key="avg_sale_price")
-            required_profit = st.number_input("Required Profit (15%)* (£)", min_value=0.0, step=1000.0, key="required_profit")
-            profit_reason = st.text_area("Reason for Profit*", value="I maintain at least a 15% profit margin to protect against unforeseen risks (e.g., market shifts, extra repairs). This margin ensures I can confidently close on the property without complications.", key="profit_reason")
+            avg_sale_price = st.number_input("Average Sale Price* (£)", min_value=0.0, step=1000.0, key="avg_sale_price_input")
+            required_profit = st.number_input("Required Profit (15%)* (£)", min_value=0.0, step=1000.0, key="required_profit_input")
+            profit_reason = st.text_area("Reason for Profit*", value="I maintain at least a 15% profit margin to protect against unforeseen risks.", key="profit_reason_input")
 
             st.markdown('#### Detailed Costs')
             costs = {
-                "Deposit": st.number_input("Deposit (£)", min_value=0.0, step=1000.0, key="cost_deposit"),
-                "Finance": st.number_input("Finance (£)", min_value=0.0, step=1000.0, key="cost_finance"),
-                "Solicitors": st.number_input("Solicitors (£)", min_value=0.0, step=500.0, key="cost_solicitors"),
-                "Stamp Duty": st.number_input("Stamp Duty (£)", min_value=0.0, step=500.0, key="cost_stamp_duty"),
-                "Estate Agent Fees": st.number_input("Estate Agent Fees (£)", min_value=0.0, step=500.0, key="cost_estate_agent"),
-                "Doors and Windows": st.number_input("Doors and Windows (£)", min_value=0.0, step=500.0, key="cost_doors_windows"),
-                "Joists and Floorboards": st.number_input("Joists and Floorboards (£)", min_value=0.0, step=500.0, key="cost_joists"),
-                "Chimney Breast": st.number_input("Chimney Breast (£)", min_value=0.0, step=500.0, key="cost_chimney"),
-                "Lintels & Structural Work": st.number_input("Lintels & Structural Work (£)", min_value=0.0, step=500.0, key="cost_lintels"),
-                "Roof, Guttering & Fascias": st.number_input("Roof, Guttering & Fascias (£)", min_value=0.0, step=500.0, key="cost_roof"),
-                "External Wall Render": st.number_input("External Wall Render (£)", min_value=0.0, step=500.0, key="cost_render"),
-                "Electrical Wiring & Lighting": st.number_input("Electrical Wiring & Lighting (£)", min_value=0.0, step=500.0, key="cost_electrical"),
-                "Wi-Fi Points": st.number_input("Wi-Fi Points (£)", min_value=0.0, step=100.0, key="cost_wifi"),
-                "Fire Safety Panels": st.number_input("Fire Safety Panels (£)", min_value=0.0, step=500.0, key="cost_fire_safety"),
-                "Studs / Plaster Boards / Insulation": st.number_input("Studs / Plaster Boards / Insulation (£)", min_value=0.0, step=500.0, key="cost_studs"),
-                "Emergency Lights": st.number_input("Emergency Lights (£)", min_value=0.0, step=100.0, key="cost_emergency_lights"),
-                "Cupboards & Skirting Boards": st.number_input("Cupboards & Skirting Boards (£)", min_value=0.0, step=500.0, key="cost_cupboards"),
-                "Window Sills": st.number_input("Window Sills (£)", min_value=0.0, step=100.0, key="cost_window_sills"),
-                "Locks & Ironmongery": st.number_input("Locks & Ironmongery (£)", min_value=0.0, step=100.0, key="cost_locks"),
-                "Plumbing & Heating": st.number_input("Plumbing & Heating (£)", min_value=0.0, step=500.0, key="cost_plumbing"),
-                "Kitchen": st.number_input("Kitchen (£)", min_value=0.0, step=500.0, key="cost_kitchen"),
-                "Bathroom": st.number_input("Bathroom (£)", min_value=0.0, step=500.0, key="cost_bathroom"),
-                "Tiling": st.number_input("Tiling (£)", min_value=0.0, step=500.0, key="cost_tiling"),
-                "Painting & Decoration": st.number_input("Painting & Decoration (£)", min_value=0.0, step=500.0, key="cost_painting"),
-                "Flooring / Carpet": st.number_input("Flooring / Carpet (£)", min_value=0.0, step=500.0, key="cost_flooring"),
-                "Garden & Landscaping": st.number_input("Garden & Landscaping (£)", min_value=0.0, step=500.0, key="cost_garden")
+                "Deposit": st.number_input("Deposit (£)", min_value=0.0, step=1000.0, key="cost_deposit_input"),
+                "Finance": st.number_input("Finance (£)", min_value=0.0, step=1000.0, key="cost_finance_input"),
+                "Solicitors": st.number_input("Solicitors (£)", min_value=0.0, step=500.0, key="cost_solicitors_input"),
+                "Stamp Duty": st.number_input("Stamp Duty (£)", min_value=0.0, step=500.0, key="cost_stamp_duty_input"),
+                "Estate Agent Fees": st.number_input("Estate Agent Fees (£)", min_value=0.0, step=500.0, key="cost_estate_agent_input"),
+                "Doors and Windows": st.number_input("Doors and Windows (£)", min_value=0.0, step=500.0, key="cost_doors_windows_input"),
+                "Joists and Floorboards": st.number_input("Joists and Floorboards (£)", min_value=0.0, step=500.0, key="cost_joists_input"),
+                "Chimney Breast": st.number_input("Chimney Breast (£)", min_value=0.0, step=500.0, key="cost_chimney_input"),
+                "Lintels & Structural Work": st.number_input("Lintels & Structural Work (£)", min_value=0.0, step=500.0, key="cost_lintels_input"),
+                "Roof, Guttering & Fascias": st.number_input("Roof, Guttering & Fascias (£)", min_value=0.0, step=500.0, key="cost_roof_input"),
+                "External Wall Render": st.number_input("External Wall Render (£)", min_value=0.0, step=500.0, key="cost_render_input"),
+                "Electrical Wiring & Lighting": st.number_input("Electrical Wiring & Lighting (£)", min_value=0.0, step=500.0, key="cost_electrical_input"),
+                "Wi-Fi Points": st.number_input("Wi-Fi Points (£)", min_value=0.0, step=100.0, key="cost_wifi_input"),
+                "Fire Safety Panels": st.number_input("Fire Safety Panels (£)", min_value=0.0, step=500.0, key="cost_fire_safety_input"),
+                "Studs / Plaster Boards / Insulation": st.number_input("Studs / Plaster Boards / Insulation (£)", min_value=0.0, step=500.0, key="cost_studs_input"),
+                "Emergency Lights": st.number_input("Emergency Lights (£)", min_value=0.0, step=100.0, key="cost_emergency_lights_input"),
+                "Cupboards & Skirting Boards": st.number_input("Cupboards & Skirting Boards (£)", min_value=0.0, step=500.0, key="cost_cupboards_input"),
+                "Window Sills": st.number_input("Window Sills (£)", min_value=0.0, step=100.0, key="cost_window_sills_input"),
+                "Locks & Ironmongery": st.number_input("Locks & Ironmongery (£)", min_value=0.0, step=100.0, key="cost_locks_input"),
+                "Plumbing & Heating": st.number_input("Plumbing & Heating (£)", min_value=0.0, step=500.0, key="cost_plumbing_input"),
+                "Kitchen": st.number_input("Kitchen (£)", min_value=0.0, step=500.0, key="cost_kitchen_input"),
+                "Bathroom": st.number_input("Bathroom (£)", min_value=0.0, step=500.0, key="cost_bathroom_input"),
+                "Tiling": st.number_input("Tiling (£)", min_value=0.0, step=500.0, key="cost_tiling_input"),
+                "Painting & Decoration": st.number_input("Painting & Decoration (£)", min_value=0.0, step=500.0, key="cost_painting_input"),
+                "Flooring / Carpet": st.number_input("Flooring / Carpet (£)", min_value=0.0, step=500.0, key="cost_flooring_input"),
+                "Garden & Landscaping": st.number_input("Garden & Landscaping (£)", min_value=0.0, step=500.0, key="cost_garden_input")
             }
 
             st.markdown('#### Potential Negative Points')
-            negative_points = st.text_area("Potential Negative Points", placeholder="e.g., market risks, structural issues", key="negative_points")
+            negative_points = st.text_area("Potential Negative Points", key="negative_points_input", placeholder="e.g., market risks, structural issues")
 
             st.markdown('#### Proposed Offers')
             offers = []
@@ -1148,47 +1153,51 @@ def offer_generator_ui(conn):
                 st.markdown(f"**Offer {i+1}**")
                 col1, col2 = st.columns(2)
                 with col1:
-                    amount = st.number_input(f"Offer {i+1} Amount (£)*", min_value=0.0, step=1000.0, key=f"offer_amount_{i}")
+                    amount = st.number_input(f"Offer {i+1} Amount (£)*", min_value=0.0, step=1000.0, key=f"offer_amount_{i}_input")
                 with col2:
-                    description = st.text_input(f"Offer {i+1} Description*", placeholder="e.g., Cash offer with quick close", key=f"offer_desc_{i}")
+                    description = st.text_input(f"Offer {i+1} Description*", key=f"offer_desc_{i}_input", placeholder="e.g., Cash offer with quick close")
                 offers.append({"amount": amount, "description": description})
 
             st.markdown('#### Social Proof & Proof of Funds')
-            social_proof = st.text_input("Google Reviews Link", key="social_proof")
-            proof_of_funds = st.text_area("Proof of Funds", placeholder="e.g., Bank statement summary", key="proof_of_funds")
+            social_proof = st.text_input("Google Reviews Link", key="social_proof_input")
+            proof_of_funds = st.text_area("Proof of Funds", key="proof_of_funds_input", placeholder="e.g., Bank statement summary")
 
             st.markdown('#### AI Configuration')
-            creativity = st.slider("Creativity Level", 0.0, 1.0, 0.3, key="offer_creativity")
+            creativity = st.slider("Creativity Level", 0.0, 1.0, 0.3, key="offer_creativity_input")
             detail_level = st.select_slider(
                 "Detail Level", options=["Minimal", "Standard", "Comprehensive"],
-                value="Standard", key="offer_detail_level"
+                value="Standard", key="offer_detail_level_input"
             )
 
             st.markdown('</div>', unsafe_allow_html=True)
 
-            submitted = st.form_submit_button("Generate Offer Draft")
+            submitted = st.form_submit_button("Generate Offer Draft", type="primary")
             if submitted:
                 missing = []
                 for field, msg in {
-                    "vendor_name": "Vendor name required",
-                    "vendor_situation": "Vendor situation required",
-                    "property_condition": "Property condition required",
-                    "local_experience": "Local experience required",
-                    "avg_sale_price": "Average sale price required",
-                    "required_profit": "Required profit required",
-                    "profit_reason": "Profit reason required"
+                    "vendor_name_input": "Vendor name required",
+                    "vendor_situation_input": "Vendor situation required",
+                    "property_condition_input": "Property condition required",
+                    "local_experience_input": "Local experience required",
+                    "avg_sale_price_input": "Average sale price required",
+                    "required_profit_input": "Required profit required",
+                    "profit_reason_input": "Profit reason required"
                 }.items():
                     if not st.session_state.get(field):
                         missing.append(msg)
                 for i in range(3):
-                    if not st.session_state.get(f"comp_address_{i}") or not st.session_state.get(f"comp_status_{i}") or not st.session_state.get(f"comp_price_{i}"):
+                    if not st.session_state.get(f"comp_address_{i}_input") or \
+                       not st.session_state.get(f"comp_status_{i}_input") or \
+                       not st.session_state.get(f"comp_price_{i}_input"):
                         missing.append(f"Comparable {i+1} details required")
-                    if not st.session_state.get(f"offer_amount_{i}") or not st.session_state.get(f"offer_desc_{i}"):
+                    if not st.session_state.get(f"offer_amount_{i}_input") or \
+                       not st.session_state.get(f"offer_desc_{i}_input"):
                         missing.append(f"Offer {i+1} amount and description required")
                 if missing:
                     for m in missing:
                         st.error(m)
                 else:
+                    st.session_state.form_submitted = True
                     st.session_state.offer_data['details'] = {
                         'vendor': {
                             'name': vendor_name,
@@ -1218,89 +1227,124 @@ def offer_generator_ui(conn):
                     st.session_state.offer_stage = 'offer_generation'
                     st.rerun()
 
+        # Clear form button
+        if st.button("Clear Form", key="clear_offer_form"):
+            for key in list(st.session_state.keys()):
+                if key.startswith("vendor_") or key.startswith("comp_") or \
+                   key.startswith("cost_") or key.startswith("offer_") or \
+                   key in ["negative_points_input", "social_proof_input", "proof_of_funds_input",
+                           "avg_sale_price_input", "required_profit_input", "profit_reason_input",
+                           "local_experience_input", "offer_creativity_input", "offer_detail_level_input"]:
+                    del st.session_state[key]
+            st.session_state.form_submitted = False
+            st.rerun()
+
     # Stage 2: Offer Generation
     if st.session_state.offer_stage == 'offer_generation':
         d = st.session_state.offer_data
         prompt = build_guided_prompt(d['details'], d['detail_level'])
 
-        with st.spinner("Generating..."):
+        with st.spinner("Generating offer draft..."):
             messages = [
-                {'role': 'system', 'content': 'You are a real estate attorney.'},
+                {'role': 'system', 'content': 'You are a real estate attorney drafting an empathetic offer letter.'},
                 {'role': 'user', 'content': prompt}
             ]
             offer = call_mistral(messages, temperature=d['creativity'])
             st.session_state.generated_offer = offer
             save_interaction(conn, 'offer_generator', prompt, offer)
 
-        st.subheader("Generated Offer")
+        st.subheader("Generated Offer Draft")
         st.markdown(offer, unsafe_allow_html=True)
-        if st.button("Proceed to Review"):
-            st.session_state.offer_stage = 'review_edit'
-            st.rerun()
-        if st.button("← Back"):
-            st.session_state.offer_stage = 'details_entry'
-            st.rerun()
+        col1, col2 = st.columns(2)
+        with col1:
+            if st.button("Proceed to Review", type="primary"):
+                st.session_state.offer_stage = 'review_edit'
+                st.rerun()
+        with col2:
+            if st.button("← Back to Details"):
+                st.session_state.offer_stage = 'details_entry'
+                st.rerun()
 
     # Stage 3: Review & Edit
     if st.session_state.offer_stage == 'review_edit':
+        st.subheader("Review & Edit Offer")
         edited = st.text_area(
-            "Edit draft", value=st.session_state.generated_offer,
-            height=300, key='offer_edit'
+            "Edit Offer Draft",
+            value=st.session_state.generated_offer,
+            height=400,
+            key='offer_edit_input'
         )
         if edited != st.session_state.edited_offer:
             st.session_state.edited_offer = edited
 
         st.markdown("#### Comments")
-        new_c = st.text_input("Add comment", key='offer_new_comment')
-        if st.button("Add Comment") and new_c:
+        new_comment = st.text_input("Add a Comment", key='offer_new_comment_input')
+        if st.button("Add Comment", key="add_comment_button") and new_comment:
             ts = datetime.now().strftime("%Y-%m-%d %H:%M")
             st.session_state.review_comments.append({
-                'ts': ts, 'text': new_c, 'resolved': False
+                'ts': ts,
+                'text': new_comment,
+                'resolved': False
             })
             st.rerun()
 
-        for i, c in enumerate(st.session_state.review_comments):
+        for i, comment in enumerate(st.session_state.review_comments):
             cols = st.columns([1, 8, 1])
             with cols[0]:
-                st.markdown(f"**{c['ts']}**")
+                st.markdown(f"**{comment['ts']}**")
             with cols[1]:
-                st.markdown(f"{'✓' if c['resolved'] else '◯'} {c['text']}")
+                st.markdown(f"{'✓' if comment['resolved'] else '◯'} {comment['text']}")
             with cols[2]:
-                if not c['resolved'] and st.button('Resolve', key=f'res_{i}'):
-                    c['resolved'] = True
+                if not comment['resolved'] and st.button('Resolve', key=f'resolve_comment_{i}'):
+                    comment['resolved'] = True
                     st.rerun()
 
-        if st.button('← Back'):
-            st.session_state.offer_stage = 'offer_generation'
-            st.rerun()
-        if st.button('Proceed to Export'):
-            st.session_state.offer_stage = 'export'
-            st.rerun()
+        col1, col2 = st.columns(2)
+        with col1:
+            if st.button('← Back to Generation'):
+                st.session_state.offer_stage = 'offer_generation'
+                st.rerun()
+        with col2:
+            if st.button('Proceed to Export', type="primary"):
+                st.session_state.offer_stage = 'export'
+                st.rerun()
 
     # Stage 4: Export
     if st.session_state.offer_stage == 'export':
+        st.subheader("Export Offer")
         content = st.session_state.edited_offer or st.session_state.generated_offer
-        if st.checkbox('Include Comments', value=True):
+        if st.checkbox('Include Comments in Export', value=True, key='include_comments_input'):
             content += (
                 "\n\n---\n## Comments\n" +
                 "\n".join([f"- [{c['ts']}] {c['text']}" for c in st.session_state.review_comments])
             )
 
-        fmt = st.selectbox('Format', ['PDF', 'Word', 'Text', 'HTML'], key='offer_export_format')
-        name = st.text_input('File Name', 'property_offer', key='offer_export_name')
+        export_format = st.selectbox(
+            'Export Format',
+            ['PDF', 'Word', 'Text', 'HTML'],
+            key='offer_export_format_input'
+        )
+        name = st.text_input(
+            'File Name (without extension)',
+            value='property_offer',
+            key='offer_export_name_input'
+        )
 
-        if st.button('Download'):
-            if fmt == 'PDF':
+        if st.button('Download Offer', type="primary", key='download_offer_button'):
+            if export_format == 'PDF':
                 pdf = FPDF()
                 pdf.add_page()
                 pdf.set_font('Arial', size=12)
                 for line in content.split('\n'):
                     pdf.multi_cell(0, 6, line.encode('latin-1', 'replace').decode('latin-1'))
                 st.download_button(
-                    'Download PDF', pdf.output(dest='S').encode('latin-1'),
-                    f"{name}.pdf", "application/pdf"
+                    'Download PDF',
+                    pdf.output(dest='S').encode('latin-1'),
+                    f"{name}.pdf",
+                    "application/pdf",
+                    key='download_pdf_button'
                 )
-            elif fmt == 'Word':
+            elif export_format == 'Word':
                 doc = Document()
                 for line in content.split('\n'):
                     if line.startswith('**') and line.endswith('**'):
@@ -1312,27 +1356,48 @@ def offer_generator_ui(conn):
                 buf = io.BytesIO()
                 doc.save(buf)
                 st.download_button(
-                    'Download Word', buf.getvalue(),
+                    'Download Word',
+                    buf.getvalue(),
                     f"{name}.docx",
-                    'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
+                    'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+                    key='download_word_button'
                 )
-            elif fmt == 'HTML':
+            elif export_format == 'HTML':
                 html = f"<pre>{content}</pre>"
                 st.download_button(
-                    'Download HTML', html.encode(),
-                    f"{name}.html", 'text/html'
+                    'Download HTML',
+                    html.encode(),
+                    f"{name}.html",
+                    'text/html',
+                    key='download_html_button'
                 )
             else:
                 st.download_button(
-                    'Download Text', content.encode(),
-                    f"{name}.txt", 'text/plain'
+                    'Download Text',
+                    content.encode(),
+                    f"{name}.txt",
+                    'text/plain',
+                    key='download_text_button'
                 )
 
-        if st.button('Start New'):
-            for k in list(st.session_state.keys()):
-                if k.startswith('offer_'):
-                    del st.session_state[k]
-            st.rerun()
+        col1, col2 = st.columns(2)
+        with col1:
+            if st.button('← Back to Review'):
+                st.session_state.offer_stage = 'review_edit'
+                st.rerun()
+        with col2:
+            if st.button('Start New Offer', type="primary"):
+                for key in list(st.session_state.keys()):
+                    if key.startswith('offer_') or key in [
+                        'vendor_name_input', 'vendor_situation_input', 'property_condition_input',
+                        'other_challenges_input', 'family_member_input', 'family_situation_input',
+                        'local_experience_input', 'avg_sale_price_input', 'required_profit_input',
+                        'profit_reason_input', 'negative_points_input', 'social_proof_input',
+                        'proof_of_funds_input', 'form_submitted'
+                    ] or key.startswith('comp_') or key.startswith('cost_') or key.startswith('offer_amount_') or key.startswith('offer_desc_'):
+                        del st.session_state[key]
+                st.session_state.offer_stage = 'details_entry'
+                st.rerun()
 
 def go_buddy_ui(conn):
     """GO Buddy - Summarize multiple documents"""
