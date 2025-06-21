@@ -165,21 +165,8 @@ def ocr_space_url(
         # try next endpoint
     raise RuntimeError(f"All OCR endpoints failed: {last_err}")
 
-
-# from google.colab import drive
-# drive.mount('/content/drive')
-
-# # ─── Database Helpers ──────────────────────────────────────────────────────────
-# # DB_PATH = "users.db"  # Define a constant for the database path
-import os
-
-# Make sure the folder exists in your Drive
-DRIVE_DB_DIR = '/content/drive/MyDrive/colab_data'
-os.makedirs(DRIVE_DB_DIR, exist_ok=True)
-
-# Store the database there
-DB_PATH = os.path.join(DRIVE_DB_DIR, 'users.db')
-
+# ─── Database Helpers ──────────────────────────────────────────────────────────
+DB_PATH = "users.db"  # Define a constant for the database path
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
@@ -294,7 +281,7 @@ def initialize_default_prompts(conn):
             "user_prompt_template": "Generate a purchase offer based on these details:\n\n{details}"
         }
     }
-
+    
     cursor = conn.cursor()
     for feature, prompts in default_prompts.items():
         cursor.execute("SELECT 1 FROM prompts WHERE feature = ?", (feature,))
@@ -913,7 +900,7 @@ def deal_structuring_ui(conn):
             f"Generate specific deal structuring strategies for this real estate deal. "
             f"Provide clear actionable strategies with implementation steps."
         )
-
+        
         with st.spinner("Developing strategies..."):
             messages = [
                 {"role": "system", "content": "You are a real estate investment strategist. Provide specific actionable deal structuring options."},
@@ -1431,13 +1418,13 @@ def go_buddy_ui(conn):
     if uploaded_files and st.button("Generate Summaries"):
         st.session_state.go_buddy_files = uploaded_files
         st.session_state.go_buddy_summaries = []
-
+        
         progress_bar = st.progress(0)
         for i, uploaded_file in enumerate(uploaded_files):
             with st.spinner(f"Processing {uploaded_file.name} ({i+1}/{len(uploaded_files)})..."):
                 file_type = "pdf" if uploaded_file.name.lower().endswith(".pdf") else "jpg"
                 pages = extract_text_with_ocr(uploaded_file=uploaded_file, file_type=file_type)
-
+                
                 if pages:
                     text = "\n".join(pages)
                     summary = call_mistral(
@@ -1450,7 +1437,7 @@ def go_buddy_ui(conn):
                         "summary": summary
                     })
                     save_interaction(conn, "go_buddy", f"Document: {uploaded_file.name}", summary)
-
+            
             progress_bar.progress((i + 1) / len(uploaded_files))
 
     if st.session_state.go_buddy_summaries:
@@ -1463,11 +1450,11 @@ def go_buddy_ui(conn):
             doc = Document()
             doc.add_heading("Merged Document Summaries", level=1)
             doc.add_paragraph(f"Generated on {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-
+            
             for summary_data in st.session_state.go_buddy_summaries:
                 doc.add_heading(summary_data['filename'], level=2)
                 doc.add_paragraph(summary_data['summary'])
-
+            
             buf = io.BytesIO()
             doc.save(buf)
             st.download_button(
@@ -1668,14 +1655,14 @@ def admin_portal_ui(conn):
 
     with tab5:
         st.subheader("Prompt Management")
-
+        
         # Select feature to edit
         feature = st.selectbox(
             "Select Feature",
             ["lease_analysis", "deal_strategy", "offer_generator"],
             format_func=lambda x: x.replace("_", " ").title()
         )
-
+        
         # Get current prompts
         cursor = conn.cursor()
         cursor.execute(
@@ -1683,7 +1670,7 @@ def admin_portal_ui(conn):
             (feature,)
         )
         prompt = cursor.fetchone()
-
+        
         if prompt:
             system_prompt = st.text_area(
                 "System Prompt",
@@ -1697,7 +1684,7 @@ def admin_portal_ui(conn):
                 height=150,
                 key=f"{feature}_user_prompt"
             )
-
+            
             if st.button("Save Changes"):
                 cursor.execute(
                     "UPDATE prompts SET system_prompt = ?, user_prompt_template = ?, updated_at = CURRENT_TIMESTAMP WHERE feature = ?",
@@ -1946,8 +1933,8 @@ def main():
         }
 
         /* Labels and select boxes */
-        .auction-section .stSelectbox,
-        .auction-section .stTextArea,
+        .auction-section .stSelectbox, 
+        .auction-section .stTextArea, 
         .auction-section .stTextInput,
         .auction-section .stNumberInput {
           background-color: #ffffff !important;
@@ -1957,7 +1944,7 @@ def main():
         }
 
         /* Primary buttons */
-        .auction-button,
+        .auction-button, 
         .stButton>button {
           background-color: #F18F01 !important;
           color: white !important;
@@ -1994,7 +1981,7 @@ def main():
 
     # Initialize database
     try:
-        conn = init_db(db_path=DB_PATH)
+        conn = init_db(DB_PATH)
         conn.close()  # Close initial connection after initialization
     except Exception as e:
         st.error(f"Failed to initialize application: {e}")
