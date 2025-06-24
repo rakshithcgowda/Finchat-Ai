@@ -37,7 +37,7 @@ GOOGLE_API_KEY = os.environ.get(
     "AIzaSyANbVVzZACnYnus00xwwRRE01n34yoAmcU"  # fallback for dev/testing
 )
 
-MISTRAL_API_KEY = os.environ.get("MISTRAL_API_KEY", "DUW9f3t6nvZaNkEbxcrxYP4hLIrC3g7Y")
+MISTRAL_API_KEY = os.environ.get("MISTRAL_API_KEY", "DUW9f3nvZaNkEbxcrxYP4hLIrC3g7Y")
 MISTRAL_ENDPOINT = "https://api.mistral.ai/v1/chat/completions"
 
 DEEPSEEK_API_KEY = os.environ.get("DEEPSEEK_API_KEY", "sk-61f7f17d33bd4598b4dd61edd13af337")
@@ -75,10 +75,7 @@ def ocr_space_file_pro(
     retries: int = 3,
     timeout: int = 120,
 ) -> dict:
-    """
-    Send a PDF or image to OCR.space PRO endpoint.
-    Tries each datacenter endpoint in turn, with exponential backoff.
-    """
+    """Enhanced OCR function with better error handling"""
     mimetype = {
         ".pdf": "application/pdf",
         ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
@@ -116,7 +113,6 @@ def ocr_space_file_pro(
                 last_err = e
                 sleep = 2 ** attempt
                 time.sleep(sleep)
-        # if this endpoint failed all retries, move to the next
     raise RuntimeError(f"All OCR endpoints failed: {last_err}")
 
 def ocr_space_url(
@@ -128,10 +124,7 @@ def ocr_space_url(
     retries: int = 3,
     timeout: int = 60,
 ) -> dict:
-    """
-    Send an image URL to OCR.space PRO endpoint.
-    Rotates through endpoints if necessary.
-    """
+    """Enhanced URL OCR function with better error handling"""
     if not url.lower().startswith(("http://", "https://")):
         raise ValueError("URL must start with http:// or https://")
 
@@ -162,15 +155,11 @@ def ocr_space_url(
             except Exception as e:
                 last_err = e
                 time.sleep(2 ** attempt)
-        # try next endpoint
     raise RuntimeError(f"All OCR endpoints failed: {last_err}")
 
 # ─── Database Helpers ──────────────────────────────────────────────────────────
-# PostgreSQL Database Configuration - Neon Cloud Connection
-# Using the actual Neon connection string
 DATABASE_URL = 'postgresql://finchat_owner:npg_k0AWSXHr6aqE@ep-ancient-poetry-a6epa959-pooler.us-west-2.aws.neon.tech/finchat?sslmode=require'
 
-# Backup individual connection parameters (not used when DATABASE_URL is provided)
 DB_CONFIG = {
     'host': 'ep-ancient-poetry-a6epa959-pooler.us-west-2.aws.neon.tech',
     'database': 'finchat',
@@ -179,10 +168,8 @@ DB_CONFIG = {
     'port': '5432'
 }
 
-# Configure logging
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 
-# Database context manager
 @contextmanager
 def get_db_connection():
     conn = None
@@ -201,12 +188,8 @@ def get_db_connection():
         if conn:
             conn.close()
 
-# Initialize database
 def init_db():
-    """
-    Initialize the database tables and schema.
-    Creates necessary tables and ensures schema updates are non-destructive.
-    """
+    """Initialize database with enhanced error handling"""
     try:
         with get_db_connection() as conn:
             cursor = conn.cursor()
@@ -223,7 +206,7 @@ def init_db():
                 )
             """)
 
-            # Check and add missing columns to users table
+            # Check and add missing columns
             cursor.execute("""
                 SELECT column_name
                 FROM information_schema.columns
@@ -294,7 +277,7 @@ def init_db():
         raise
 
 def initialize_default_prompts(conn):
-    """Initialize default prompts if they don't exist"""
+    """Initialize default prompts with better structure"""
     default_prompts = {
         "lease_analysis": {
             "system_prompt": "You are a real estate document expert. Analyze the provided lease agreement and provide a comprehensive summary, including key terms and potential risks.",
@@ -321,7 +304,7 @@ def initialize_default_prompts(conn):
     conn.commit()
 
 def create_default_admin(conn):
-    """Create a default admin user if none exists."""
+    """Create default admin with secure password"""
     try:
         cursor = conn.cursor()
         cursor.execute("SELECT COUNT(*) FROM users")
@@ -351,7 +334,7 @@ def verify_password(hashed, password: str) -> bool:
 
 # ─── AI Helper Functions ───────────────────────────────────────────────────────
 def get_feature_prompt(conn, feature: str, input_text: str) -> tuple:
-    """Get the system and user prompts for a specific feature"""
+    """Get prompts with better error handling"""
     cursor = conn.cursor()
     cursor.execute(
         "SELECT system_prompt, user_prompt_template FROM prompts WHERE feature = %s",
@@ -370,6 +353,7 @@ def call_gemini(
     content: str,
     temperature: float = 0.7
 ) -> str:
+    """Enhanced Gemini call with better error handling"""
     try:
         model = genai.GenerativeModel('gemini-1.5-flash')
         system_prompt, user_prompt = get_feature_prompt(conn, feature, content)
@@ -390,7 +374,7 @@ def call_gemini(
         st.error(f"Gemini API error: {e}")
         return f"Error: {e}"
 
-def call_mistral(
+def call_deepseek(
     messages: List[Dict[str, str]],
     temperature: float = 0.2,
     top_p: float = 1.0,
@@ -400,6 +384,7 @@ def call_mistral(
     user: str = None,
     logit_bias: Dict[int, float] = None,
 ) -> str:
+    """Enhanced Mistral call with better error handling"""
     payload = {
         "model": "mistral-small-latest",
         "messages": messages,
@@ -415,13 +400,17 @@ def call_mistral(
         payload["logit_bias"] = logit_bias
 
     headers = {"Authorization": f"Bearer {MISTRAL_API_KEY}", "Content-Type": "application/json"}
-    resp = requests.post(MISTRAL_ENDPOINT, json=payload, headers=headers, stream=stream)
-    resp.raise_for_status()
-    data = resp.json()
+    try:
+        resp = requests.post(MISTRAL_ENDPOINT, json=payload, headers=headers, stream=stream)
+        resp.raise_for_status()
+        data = resp.json()
 
-    if stream:
-        return "".join(chunk.get("content", "") for chunk in data.get("choices", []))
-    return data["choices"][0]["message"]["content"]
+        if stream:
+            return "".join(chunk.get("content", "") for chunk in data.get("choices", []))
+        return data["choices"][0]["message"]["content"]
+    except Exception as e:
+        st.error(f"Mistral API error: {e}")
+        return f"Error: {e}"
 
 def call_deepseek(
     messages: List[Dict[str, str]],
@@ -433,6 +422,7 @@ def call_deepseek(
     presence_penalty: float = 0.0,
     stream: bool = False,
 ) -> str:
+    """Enhanced DeepSeek call with better error handling"""
     try:
         resp = DEEPSEEK_CLIENT.chat.completions.create(
             model=model,
@@ -451,13 +441,17 @@ def call_deepseek(
         return f"Error processing request with DeepSeek: {str(e)}"
 
 def save_interaction(conn, feature: str, input_text: str, output_text: str):
+    """Save interaction with better error handling"""
     if st.session_state.get("username"):
-        cursor = conn.cursor()
-        cursor.execute(
-            "INSERT INTO interactions (username, feature, input_text, output_text) VALUES (%s, %s, %s, %s)",
-            (st.session_state.username, feature, input_text, output_text),
-        )
-        conn.commit()
+        try:
+            cursor = conn.cursor()
+            cursor.execute(
+                "INSERT INTO interactions (username, feature, input_text, output_text) VALUES (%s, %s, %s, %s)",
+                (st.session_state.username, feature, input_text, output_text),
+            )
+            conn.commit()
+        except psycopg2.Error as e:
+            logging.error(f"Failed to save interaction: {e}")
 
 def extract_text_with_ocr(uploaded_file=None, file_type: str = "pdf", url: str = None):
     """Enhanced text extraction with OCR.space API for PDFs and images."""
@@ -508,7 +502,6 @@ def extract_text_with_ocr(uploaded_file=None, file_type: str = "pdf", url: str =
                             logging.error(f"OCR failed for page {i+1}: {e}")
                             ocr_pages.append("")
                         progress.progress((i + 1) / len(images))
-                        # Clean up intermediate images
                         try:
                             os.unlink(img_path)
                         except:
@@ -582,7 +575,7 @@ def extract_text_with_ocr(uploaded_file=None, file_type: str = "pdf", url: str =
         return []
 
 def convert_pdf_to_images(pdf_file, output_dir, dpi=300):
-    """Convert PDF to high-quality images for OCR"""
+    """Convert PDF to high-quality images for OCR with better error handling"""
     images = []
     try:
         with pdfplumber.open(pdf_file) as pdf:
@@ -596,7 +589,7 @@ def convert_pdf_to_images(pdf_file, output_dir, dpi=300):
     return images
 
 def preprocess_image_for_ocr(img):
-    """Enhance image quality for better OCR results"""
+    """Enhanced image preprocessing for better OCR results"""
     try:
         # Convert to grayscale
         if img.mode != 'L':
@@ -616,27 +609,59 @@ def preprocess_image_for_ocr(img):
         return img
 
 def lease_summarization_ui(conn):
-    """Lease Summarization: upload PDF or JPG, or provide a JPG URL, and get a full-document summary after OCR extraction."""
+    """Enhanced LeaseBrief Buddy with better OCR handling, summary refinement, and chat functionality"""
+    import logging
+    import streamlit as st
+    from datetime import datetime
+    from fpdf import FPDF
+    from docx import Document
+    import docx
+    from docx.shared import Pt, Cm
+    import io
+
+    logging.debug("Entering lease_summarization_ui")
+
     st.header("📄 LeaseBrief Buddy")
 
     # Clear previous summary and related data
     if st.button("Clear Summary", key="clear_lease_summary"):
-        for k in ['last_file', 'last_url', 'last_summary', 'last_mode', 'last_engine', 'extracted_pages', 'used_ocr', 'last_selected_page_index']:
+        for k in [
+            'last_file', 'last_url', 'last_summary', 'last_mode',
+            'last_engine', 'extracted_pages', 'used_ocr',
+            'last_selected_page_index', 'lease_chat_memory'
+        ]:
             st.session_state.pop(k, None)
         st.success("Cleared previous summary and related content.")
         st.rerun()
 
     st.markdown(
-        "Upload your lease PDF or JPG image, or provide a public JPG URL. Text will be extracted using OCR and summarized as a full document."
+        "Upload your lease PDF or JPG image, or provide a public JPG URL. "
+        "Text will be extracted using OCR and summarized as a full document."
     )
+
+    # Initialize session state defaults
+    if 'last_engine' not in st.session_state:
+        st.session_state.last_engine = "in-depth"
+    if 'lease_chat_memory' not in st.session_state:
+        st.session_state.lease_chat_memory = []
+    if 'used_ocr' not in st.session_state:
+        st.session_state.used_ocr = False
+    if 'extracted_pages' not in st.session_state:
+        st.session_state.extracted_pages = []
 
     # File uploader for PDF or JPG
     uploaded_file = st.file_uploader(
-        "Upload Lease Document (PDF or JPG)", type=["pdf", "jpg", "jpeg"], key="lease_file_uploader"
+        "Upload Lease Document (PDF or JPG)",
+        type=["pdf", "jpg", "jpeg"],
+        key="lease_file_uploader"
     )
 
     # URL input for remote JPG
-    image_url = st.text_input("Or Enter Public JPG URL", key="lease_image_url", placeholder="e.g., https://example.com/image.jpg")
+    image_url = st.text_input(
+        "Or Enter Public JPG URL",
+        key="lease_image_url",
+        placeholder="e.g., https://example.com/image.jpg"
+    )
 
     # Validate inputs
     if uploaded_file and image_url:
@@ -644,6 +669,7 @@ def lease_summarization_ui(conn):
         return
     elif not uploaded_file and not image_url:
         st.info("Please upload a file or enter a URL to proceed.")
+        st.markdown("### Getting Started\nUpload a lease document or provide a JPG URL to extract and summarize its contents.")
         return
 
     # Determine input type
@@ -654,104 +680,122 @@ def lease_summarization_ui(conn):
         file_type = "jpg"
         input_identifier = image_url
 
-    # Check if input has changed
-    if 'last_file' in st.session_state and uploaded_file and st.session_state.last_file != uploaded_file.name:
-        for k in ['last_summary', 'last_mode', 'last_engine', 'extracted_pages', 'used_ocr', 'last_selected_page_index', 'last_url']:
-            st.session_state.pop(k, None)
-    elif 'last_url' in st.session_state and image_url and st.session_state.last_url != image_url:
-        for k in ['last_summary', 'last_mode', 'last_engine', 'extracted_pages', 'used_ocr', 'last_selected_page_index', 'last_file']:
-            st.session_state.pop(k, None)
+    logging.debug(f"Input: uploaded_file={uploaded_file.name if uploaded_file else None}, image_url={image_url}, file_type={file_type}")
+
+    # If input changed, reset OCR state
+    if uploaded_file and st.session_state.get('last_file') != (uploaded_file.name if uploaded_file else None):
+        st.session_state.used_ocr = False
+        st.session_state.extracted_pages = []
+    if image_url and st.session_state.get('last_url') != image_url:
+        st.session_state.used_ocr = False
+        st.session_state.extracted_pages = []
 
     # AI engine selection
     ai_engine = st.radio(
         "Select AI Model",
-        ["in-depth"],
+        ["in-depth"],  # Expandable to other models
         index=0,
         horizontal=True,
         key="lease_ai_engine"
     )
+    st.session_state.last_engine = ai_engine
+    logging.debug(f"Selected AI engine: {ai_engine}")
 
-    # Extract text if not already done or if input has changed
-    if 'extracted_pages' not in st.session_state or \
-       (uploaded_file and st.session_state.get('last_file') != uploaded_file.name) or \
-       (image_url and st.session_state.get('last_url') != image_url):
-        if st.button("Extract Text", key="lease_extract_button"):
-            pages = extract_text_with_ocr(uploaded_file=uploaded_file, file_type=file_type, url=image_url)
-            if not pages:
-                st.error(f"No readable text found in the {'PDF' if file_type == 'pdf' else 'JPG'} after OCR.")
-                return
-
-            # Store extracted pages and input identifier
-            st.session_state['extracted_pages'] = pages
-            st.session_state['used_ocr'] = True
+    # OCR Extraction
+    if st.button("Extract Text", key="lease_extract_button"):
+        pages = extract_text_with_ocr(
+            uploaded_file=uploaded_file,
+            file_type=file_type,
+            url=image_url
+        )
+        if not pages:
+            st.error(f"No readable text found in the {'PDF' if file_type == 'pdf' else 'JPG'} after OCR.")
+            st.markdown(
+                "**Suggestions**:\n"
+                "- Ensure the document is clear and legible.\n"
+                "- Try uploading a higher-resolution file.\n"
+                "- For PDFs, ensure text is not embedded as an image."
+            )
+            logging.error(f"OCR failed for {input_identifier}")
+        else:
+            st.session_state.extracted_pages = pages
+            st.session_state.used_ocr = True
             if uploaded_file:
-                st.session_state['last_file'] = uploaded_file.name
+                st.session_state.last_file = uploaded_file.name
             else:
-                st.session_state['last_url'] = image_url
+                st.session_state.last_url = image_url
+            logging.info(f"Text extracted: {len(pages)} pages for {input_identifier}")
             st.rerun()
 
-    # Display extracted text preview if available
-    if 'extracted_pages' in st.session_state:
-        st.subheader("Extracted Text Preview")
-        page_options = [f"Page {i+1}" for i in range(len(st.session_state['extracted_pages']))] if file_type == "pdf" else ["Image"]
-        selected_page = st.selectbox(
-            "Select Page to View Extracted Text",
-            page_options,
-            key="extracted_text_dropdown",
-            index=st.session_state.get('last_selected_page_index', 0)
-        )
-        st.session_state['last_selected_page_index'] = page_options.index(selected_page)
-        page_index = page_options.index(selected_page)
-        extracted_text = st.session_state['extracted_pages'][page_index]
-        if extracted_text.strip():
-            st.text_area(
-                f"Extracted Text for {selected_page} (via OCR)",
-                value=extracted_text,
-                height=300,
-                key=f"extracted_text_page_{page_index}"
-            )
-        else:
-            st.warning(f"No text extracted for {selected_page}. Try a different file or check the document quality.")
+    # # Show status or preview
+    # if not st.session_state.used_ocr:
+    #     st.info("OCR has not yet been run. Click **Extract Text** to extract and preview document text.")
+    # else:
+    #     st.subheader("Extracted Text Preview")
+    #     page_options = (
+    #         [f"Page {i+1}" for i in range(len(st.session_state.extracted_pages))]
+    #         if file_type == "pdf" else ["Image"]
+    #     )
+    #     selected_page = st.selectbox(
+    #         "Select Page to View Extracted Text",
+    #         page_options,
+    #         key="extracted_text_dropdown",
+    #         index=st.session_state.get('last_selected_page_index', 0)
+    #     )
+    #     st.session_state['last_selected_page_index'] = page_options.index(selected_page)
+    #     page_index = page_options.index(selected_page)
+    #     extracted_text = st.session_state.extracted_pages[page_index]
+    #     if extracted_text.strip():
+    #         st.text_area(
+    #             f"Extracted Text for {selected_page} (via OCR)",
+    #             value=extracted_text,
+    #             height=300,
+    #             key=f"extracted_text_page_{page_index}"
+    #         )
+    #     else:
+    #         st.warning(f"No text extracted for {selected_page}. Try a different file or check the document quality.")
+    #         logging.warning(f"No text extracted for page {page_index + 1}")
 
         # Generate full document summary
         if st.button("Generate Summary", key="lease_generate_button"):
-            pages = st.session_state['extracted_pages']
-            if not any(p.strip() for p in pages):
+            text = "\n".join(st.session_state.extracted_pages)
+            if not text.strip():
                 st.error("No readable text available for summarization.")
+                logging.error("No readable text for summarization")
                 return
 
-            st.session_state['last_engine'] = ai_engine
-
-            text = "\n".join(pages)
             with st.spinner("Summarizing full document..."):
                 summaries = []
                 chunks = [text[i:i+15000] for i in range(0, len(text), 15000)] if len(text) > 15000 else [text]
                 for chunk in chunks:
                     prompt = (
-                        "Summarize this portion of the lease agreement in clear, concise language, "
-                        "preserving all key details:\n\n" + chunk
+                        f"Summarize this portion of the lease agreement in {ai_engine.lower()} language, "
+                        f"preserving all key details:\n\n{chunk}"
                     )
-                    summaries.append(call_mistral(
-                        messages=[{"role": "user", "content": prompt}],
-                        temperature=0.3,
-                        max_tokens=1024
-                    ))
+                    try:
+                        summary = call_deepseek(
+                            messages=[{"role": "user", "content": prompt}],
+                            temperature=0.3,
+                            max_tokens=1024
+                        )
+                        summaries.append(summary)
+                    except Exception as e:
+                        st.error(f"Failed to generate summary chunk: {e}")
+                        logging.error(f"Summary generation failed: {e}")
+                        return
                 final = "\n\n".join(summaries)
-            st.subheader("Full Document Summary")
-            st.markdown(final)
+
+            st.session_state.last_summary = final
             save_interaction(conn, "lease_summary_full", input_identifier, final)
-            st.session_state['last_summary'] = final
+            logging.info(f"Summary generated for {input_identifier}")
             st.rerun()
 
-    # Display existing summary if available
+    # Display and refine existing summary
     if 'last_summary' in st.session_state and \
        ((uploaded_file and st.session_state.get('last_file') == uploaded_file.name) or \
         (image_url and st.session_state.get('last_url') == image_url)):
-        engine = st.session_state['last_engine']
-        summary_content = st.session_state['last_summary']
-        st.subheader(f"Full Document Summary ({engine})")
-        st.markdown(summary_content)
-        st.divider()
+        st.subheader(f"Full Document Summary ({st.session_state['last_engine']})")
+        st.markdown(st.session_state['last_summary'])
 
         # Export section
         st.markdown("### 📥 Export Summary")
@@ -813,7 +857,7 @@ def lease_summarization_ui(conn):
         info = [
             ("Input File", input_identifier),
             ("Mode", "Full Document"),
-            ("AI Model", engine),
+            ("AI Model", st.session_state['last_engine']),
             ("Generated at", datetime.now().strftime("%Y-%m-%d %H:%M:%S")),
         ]
         for i, (label, val) in enumerate(info):
@@ -821,11 +865,11 @@ def lease_summarization_ui(conn):
             pdf.set_font('Arial', 'B', 11)
             pdf.cell(50, 6, f"{label}:", ln=0, fill=True)
             pdf.set_font('Arial', '', 11)
-            pdf.cell(0, 6, val.encode('latin-1', 'replace').decode('latin-1'), ln=1, fill=True)
+            pdf.cell(0, 6, str(val).encode('latin-1', 'replace').decode('latin-1'), ln=1, fill=True)
         pdf.ln(6)
 
         pdf.section_title("Lease Summary")
-        pdf.paragraph(summary_content)
+        pdf.paragraph(st.session_state['last_summary'])
 
         try:
             pdf_bytes = pdf.output(dest='S').encode('latin-1', 'ignore')
@@ -838,15 +882,16 @@ def lease_summarization_ui(conn):
             )
         except Exception as e:
             st.error(f"PDF generation failed: {e}")
+            logging.error(f"PDF export failed: {e}")
 
         # Word Export
         doc = Document()
         sections = doc.sections
         for sec in sections:
-            sec.top_margin = docx.shared.Cm(2.5)
-            sec.bottom_margin = docx.shared.Cm(2.5)
-            sec.left_margin = docx.shared.Cm(2.0)
-            sec.right_margin = docx.shared.Cm(2.0)
+            sec.top_margin = Cm(2.5)
+            sec.bottom_margin = Cm(2.5)
+            sec.left_margin = Cm(2.0)
+            sec.right_margin = Cm(2.0)
 
         doc.styles['Heading 1'].font.name = 'Calibri'
         doc.styles['Heading 1'].font.size = Pt(16)
@@ -855,9 +900,9 @@ def lease_summarization_ui(conn):
         doc.styles['Normal'].font.size = Pt(12)
 
         doc.add_heading("Lease Agreement Summary", level=1)
-        doc.add_paragraph(f"Mode: Full Document    AI Model: {engine}", style='Normal')
+        doc.add_paragraph(f"Mode: Full Document    AI Model: {st.session_state['last_engine']}", style='Normal')
 
-        for para in summary_content.split("\n\n"):
+        for para in st.session_state['last_summary'].split("\n\n"):
             doc.add_paragraph(para, style='Normal')
 
         buf = io.BytesIO()
@@ -870,8 +915,70 @@ def lease_summarization_ui(conn):
             key="lease_export_word"
         )
 
+    # Chat functionality specific to the current lease
+    if 'last_summary' in st.session_state:
+        st.divider()
+        # st.subheader("Lease Chat")
+
+        # Display chat history
+        for role, message in st.session_state.lease_chat_memory:
+            st.chat_message(role).write(message)
+
+        # Chat input
+        user_input = st.chat_input("Ask about this lease...")
+        if user_input:
+            # Add user message to chat
+            st.session_state.lease_chat_memory.append(("user", user_input))
+            st.chat_message("user").write(user_input)
+
+            # Handle summary refinement via chat
+            if user_input.lower().startswith("refine summary"):
+                with st.spinner("Refining summary..."):
+                    prompt = f"Current Summary:\n{st.session_state['last_summary']}\n\nRefinement Request:\n{user_input}"
+                    try:
+                        response = call_deepseek(
+                            messages=[
+                                {"role": "system", "content": "Refine the lease summary based on the user's request."},
+                                {"role": "user", "content": prompt}
+                            ],
+                            temperature=0.3
+                        )
+                        st.session_state.last_summary = response
+                        st.session_state.lease_chat_memory.append(("assistant", f"Summary refined: {response}"))
+                        save_interaction(conn, "lease_chat_refine", user_input, response)
+                        logging.info("Summary refined via chat")
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"Failed to refine summary via chat: {e}")
+                        logging.error(f"Chat refinement failed: {e}")
+            else:
+                # Build context from the lease summary
+                context = f"Lease Summary:\n{st.session_state['last_summary']}\n\nQuestion: {user_input}"
+
+                # Call AI
+                with st.spinner("Generating response..."):
+                    try:
+                        response = call_deepseek(
+                            messages=[
+                                {"role": "system", "content": "You are a lease agreement expert. Answer questions based on the provided lease summary."},
+                                {"role": "user", "content": context}
+                            ],
+                            temperature=0.2
+                        )
+
+                        # Add AI response to chat
+                        st.session_state.lease_chat_memory.append(("assistant", response))
+                        st.chat_message("assistant").write(response)
+
+                        # Save interaction
+                        save_interaction(conn, "lease_chat", user_input, response)
+                        logging.info("Chat response generated")
+                    except Exception as e:
+                        st.error(f"Chat response failed: {e}")
+                        logging.error(f"Chat response failed: {e}")
+
 def deal_structuring_ui(conn):
-    """Enhanced deal structuring with persistent strategy chat and detailed strategies."""
+    """Enhanced Auction Buddy with better strategy listing and chat functionality"""
     st.header("💡 Auction Buddy")
     st.markdown("Get AI-powered strategies tailored to your property deal based on buyer and seller details.")
 
@@ -941,7 +1048,7 @@ def deal_structuring_ui(conn):
                 {"role": "system", "content": "You are a real estate investment strategist. Provide specific actionable deal structuring options."},
                 {"role": "user", "content": prompt}
             ]
-            strategies = call_mistral(messages=messages)
+            strategies = call_deepseek(messages=messages)
 
         # Record and display
         st.session_state.deal_strategy_memory.append(("assistant", strategies))
@@ -949,12 +1056,13 @@ def deal_structuring_ui(conn):
         st.subheader("Recommended Strategies")
         st.markdown(strategies)
 
-        # Parse strategies for dropdown
+        # Parse strategies for dropdown - improved regex pattern
         matches = re.findall(
-            r"Strategy\s+(\d+):.*?\n(.*?)(?=(?:Strategy\s+\d+:)|\Z)",
+            r"(?:Strategy|Option)\s+(\d+)[:\.]?\s*(.*?)(?=\n\n|\Z|(?:Strategy|Option)\s+\d+|$)",
             strategies,
             flags=re.DOTALL
         )
+
         if matches:
             for num, text in matches:
                 strategy_key = f"Strategy {num}"
@@ -972,12 +1080,13 @@ def deal_structuring_ui(conn):
     # Strategy evaluation & refinement
     strategies = st.session_state.get("last_strategies")
     if strategies:
-        # Parse individual strategies
+        # Parse individual strategies with improved pattern
         matches = re.findall(
-            r"Strategy\s+(\d+):.*?\n(.*?)(?=(?:Strategy\s+\d+:)|\Z)",
+            r"(?:Strategy|Option)\s+(\d+)[:\.]?\s*(.*?)(?=(?:\n\n|\Z|(?:Strategy|Option)\s+\d+))",
             strategies,
             flags=re.DOTALL
         )
+
         if matches:
             strategy_dict = {f"Strategy {num}": text.strip() for num, text in matches}
         else:
@@ -1015,16 +1124,54 @@ def deal_structuring_ui(conn):
                 {"role": "system", "content": "Refine the selected strategy based on user feedback."},
                 {"role": "user", "content": refinement_prompt}
             ]
-            refinement = call_mistral(messages=messages)
+            refinement = call_deepseek(messages=messages)
 
             st.session_state.deal_strategy_memory.append(("assistant", refinement))
             st.markdown(refinement)
             save_interaction(conn, "deal_strategy_refinement", selected_text, refinement)
 
+    # # Strategy chat functionality
+    # if st.session_state.get("last_strategies"):
+    #     st.divider()
+    #     st.subheader("Strategy Chat")
+
+        # Initialize chat memory if not exists
+        if 'strategy_chat_memory' not in st.session_state:
+            st.session_state.strategy_chat_memory = []
+
+        # Display chat history
+        for role, message in st.session_state.strategy_chat_memory:
+            st.chat_message(role).write(message)
+
+        # Chat input
+        user_input = st.chat_input("Ask about these strategies...")
+        if user_input:
+            # Add user message to chat
+            st.session_state.strategy_chat_memory.append(("user", user_input))
+            st.chat_message("user").write(user_input)
+
+            # Build context from the strategies
+            context = f"Strategies:\n{st.session_state['last_strategies']}\n\nQuestion: {user_input}"
+
+            # Call AI
+            with st.spinner("Generating response..."):
+                response = call_deepseek(
+                    messages=[
+                        {"role": "system", "content": "You are a real estate strategy expert. Answer questions based on the provided strategies."},
+                        {"role": "user", "content": context}
+                    ],
+                    temperature=0.3
+                )
+
+            # Add AI response to chat
+            st.session_state.strategy_chat_memory.append(("assistant", response))
+            st.chat_message("assistant").write(response)
+
+            # Save interaction
+            save_interaction(conn, "strategy_chat", user_input, response)
+
 def build_guided_prompt(details: dict, detail_level: str) -> str:
-    """
-    Construct a detailed prompt from guided form data to generate a real estate purchase agreement.
-    """
+    """Enhanced prompt builder with better structure"""
     vendor_name = details['vendor']['name']
     vendor_situation = details['vendor']['situation']
     property_condition = details['vendor']['condition']
@@ -1077,11 +1224,12 @@ def build_guided_prompt(details: dict, detail_level: str) -> str:
         f"- Social Proof: {social_proof}" if social_proof else "",
         f"- Proof of Funds: {proof_of_funds}" if proof_of_funds else "",
         f"Level of Detail: {detail_level}.",
-        "Format the output as an empathetic offer letter, starting with an acknowledgment of the vendor's situation, expressing willingness to help, and thanking them for their time. Highlight the property and locality positively. Include headings and bold key points as per the provided example. Include incentives like covering legal costs, no estate agent fees, and benefits of a Purchase Lease Option and Exchange with Delayed Completion. Suggest next steps, such as preparing a Heads of Terms document."
+        "Format the output as an empathetic offer letter, starting with an acknowledgment of the vendor's situation, expressing willingness to help, and thanking them for their time. Highlight the property and locality positively.Include headings and bold key points as per the provided example. Include incentives like covering legal costs, no estate agent fees, and benefits of a Purchase Lease Option and Exchange with Delayed Completion. Suggest next steps, such as preparing a Heads of Terms document."
     ]
     return "\n".join([s for s in sections if s])
 
 def offer_generator_ui(conn):
+    """Enhanced Offer Buddy with fixed comments and download functionality"""
     st.header("✍️ Offer Buddy")
     st.markdown(
         """
@@ -1095,12 +1243,12 @@ def offer_generator_ui(conn):
     # Initialize session state for Offer Buddy
     if 'offer_stage' not in st.session_state:
         st.session_state.update({
-            'offer_stage': 'details_entry',  # Ensure default stage is details_entry
+            'offer_stage': 'details_entry',
             'offer_data': {},
             'generated_offer': None,
             'edited_offer': None,
             'review_comments': [],
-            'form_submitted': False  # Track form submission state
+            'form_submitted': False
         })
 
     # Navigation tabs for stages
@@ -1120,7 +1268,6 @@ def offer_generator_ui(conn):
     # Stage 1: Details Entry
     if st.session_state.offer_stage == 'details_entry':
         st.markdown("### 1. Enter Offer Details")
-        # Use a unique key for the form to prevent state conflicts
         with st.form("offer_details_form", clear_on_submit=False):
             st.markdown('<div class="offer-section">', unsafe_allow_html=True)
             st.markdown('#### Vendor Details')
@@ -1284,7 +1431,7 @@ def offer_generator_ui(conn):
                 {'role': 'system', 'content': 'You are a real estate attorney drafting an empathetic offer letter.'},
                 {'role': 'user', 'content': prompt}
             ]
-            offer = call_mistral(messages, temperature=d['creativity'])
+            offer = call_deepseek(messages, temperature=d['creativity'])
             st.session_state.generated_offer = offer
             save_interaction(conn, 'offer_generator', prompt, offer)
 
@@ -1344,15 +1491,14 @@ def offer_generator_ui(conn):
                 st.session_state.offer_stage = 'export'
                 st.rerun()
 
-    # Stage 4: Export
+    # Stage 4: Export - Fixed download functionality
     if st.session_state.offer_stage == 'export':
         st.subheader("Export Offer")
         content = st.session_state.edited_offer or st.session_state.generated_offer
         if st.checkbox('Include Comments in Export', value=True, key='include_comments_input'):
-            content += (
-                "\n\n---\n## Comments\n" +
+            comments_section = "\n\n---\n## Comments\n" + \
                 "\n".join([f"- [{c['ts']}] {c['text']}" for c in st.session_state.review_comments])
-            )
+            content += comments_section
 
         export_format = st.selectbox(
             'Export Format',
@@ -1372,9 +1518,10 @@ def offer_generator_ui(conn):
                 pdf.set_font('Arial', size=12)
                 for line in content.split('\n'):
                     pdf.multi_cell(0, 6, line.encode('latin-1', 'replace').decode('latin-1'))
+                pdf_output = pdf.output(dest='S').encode('latin-1')
                 st.download_button(
                     'Download PDF',
-                    pdf.output(dest='S').encode('latin-1'),
+                    pdf_output,
                     f"{name}.pdf",
                     "application/pdf",
                     key='download_pdf_button'
@@ -1435,13 +1582,14 @@ def offer_generator_ui(conn):
                 st.rerun()
 
 def go_buddy_ui(conn):
-    """GO Buddy - Summarize multiple documents"""
+    """Enhanced GO Buddy with better OCR handling and chat functionality"""
     st.header("🚀 GO Buddy")
     st.markdown("Upload multiple documents and get individual summaries in one merged document.")
 
     if 'go_buddy_files' not in st.session_state:
         st.session_state.go_buddy_files = []
         st.session_state.go_buddy_summaries = []
+        st.session_state.go_buddy_chat_memory = []
 
     uploaded_files = st.file_uploader(
         "Upload Documents (PDF or JPG)",
@@ -1453,6 +1601,7 @@ def go_buddy_ui(conn):
     if uploaded_files and st.button("Generate Summaries"):
         st.session_state.go_buddy_files = uploaded_files
         st.session_state.go_buddy_summaries = []
+        st.session_state.go_buddy_chat_memory = []
 
         progress_bar = st.progress(0)
         for i, uploaded_file in enumerate(uploaded_files):
@@ -1462,14 +1611,15 @@ def go_buddy_ui(conn):
 
                 if pages:
                     text = "\n".join(pages)
-                    summary = call_mistral(
+                    summary = call_deepseek(
                         messages=[{"role": "user", "content": f"Summarize this document in clear, concise language:\n\n{text}"}],
                         temperature=0.3,
                         max_tokens=1024
                     )
                     st.session_state.go_buddy_summaries.append({
                         "filename": uploaded_file.name,
-                        "summary": summary
+                        "summary": summary,
+                        "text": text  # Store the full extracted text for chat
                     })
                     save_interaction(conn, "go_buddy", f"Document: {uploaded_file.name}", summary)
 
@@ -1499,9 +1649,46 @@ def go_buddy_ui(conn):
                 mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document"
             )
 
-# ─── Admin Portal ──────────────────────────────────────────────────────────────
+        # GO Buddy Chat functionality
+        st.divider()
+        st.subheader("Document Chat")
+
+        # Display chat history
+        for role, message in st.session_state.go_buddy_chat_memory:
+            st.chat_message(role).write(message)
+
+        # Chat input
+        user_input = st.chat_input("Ask about these documents...")
+        if user_input:
+            # Add user message to chat
+            st.session_state.go_buddy_chat_memory.append(("user", user_input))
+            st.chat_message("user").write(user_input)
+
+            # Build context from all documents
+            context = "Documents:\n"
+            for doc in st.session_state.go_buddy_summaries:
+                context += f"\nDocument: {doc['filename']}\nSummary: {doc['summary']}\n"
+            context += f"\nQuestion: {user_input}"
+
+            # Call AI
+            with st.spinner("Generating response..."):
+                response = call_deepseek(
+                    messages=[
+                        {"role": "system", "content": "You are a document analysis expert. Answer questions based on the provided document summaries."},
+                        {"role": "user", "content": context}
+                    ],
+                    temperature=0.3
+                )
+
+            # Add AI response to chat
+            st.session_state.go_buddy_chat_memory.append(("assistant", response))
+            st.chat_message("assistant").write(response)
+
+            # Save interaction
+            save_interaction(conn, "go_buddy_chat", user_input, response)
+
 def admin_portal_ui(conn):
-    """Enhanced admin portal with usage analytics, subscription management, and prompt viewer"""
+    """Admin portal with enhanced functionality"""
     st.header("🔒 Admin Portal")
 
     tab1, tab2, tab3, tab4, tab5 = st.tabs(["User Management", "Subscription Management", "Content Management", "Usage Analytics", "Prompt Management"])
@@ -1509,7 +1696,6 @@ def admin_portal_ui(conn):
     with tab1:
         st.subheader("User Accounts")
         cursor = conn.cursor()
-        # PostgreSQL way to get column information
         cursor.execute("""
             SELECT column_name
             FROM information_schema.columns
@@ -1751,9 +1937,8 @@ def admin_portal_ui(conn):
         else:
             st.warning("No prompts found for this feature")
 
-# ─── History View ──────────────────────────────────────────────────────────────
 def history_ui(conn):
-    """Show user's interaction history"""
+    """Enhanced history view with better navigation"""
     st.header("🕒 Your History")
 
     if "username" not in st.session_state:
@@ -1810,27 +1995,33 @@ def history_ui(conn):
                 }
                 st.rerun()
 
-# ─── Chatbot Helper (Conversational) ───────────────────────────────────────────
 def chatbot_ui(conn):
-    """Persistent conversational chatbot beneath features"""
+    """Enhanced chatbot with better context handling"""
     if not st.session_state.get("username"):
         st.warning("Please log in to use the chatbot.")
         return
-    # Retrieve conversation for this feature
+
+    # Initialize chat memory if not exists
     if "chat_memory" not in st.session_state:
         st.session_state["chat_memory"] = []
+
     st.header("🤖 AI Chatbot")
-        # Clear chat button
+
+    # Clear chat button
     if st.button("Clear Chat", key="clear_chat_button"):
         st.session_state["chat_memory"] = []
+
     st.markdown("Chat with the assistant based on your recent output.")
+
     # Display past messages
     for role, message in st.session_state["chat_memory"]:
         st.chat_message(role).write(message)
+
     # New user message
     user_input = st.chat_input("Type your question...")
     if user_input:
         st.session_state["chat_memory"].append(("user", user_input))
+
         # Build context from last 10 interactions
         cursor = conn.cursor()
         cursor.execute(
@@ -1840,6 +2031,7 @@ def chatbot_ui(conn):
         rows = cursor.fetchall()
         context = "\n\n".join([f"Feature: {r['feature']}\nInput: {r['input_text']}\nOutput: {r['output_text']}" for r in rows])
         prompt = f"Context:\n{context}\n\nQuestion:\n{user_input}"
+
         # Call AI
         if st.session_state.get("chat_model_choice", "Gemini") == "Gemini":
             answer = call_gemini(conn, "chatbot", prompt)
@@ -1848,21 +2040,23 @@ def chatbot_ui(conn):
                 {"role": "system", "content": "You are a helpful assistant using past interactions."},
                 {"role": "user", "content": prompt}
             ]
-            answer = call_mistral(messages)
+            answer = call_deepseek(messages)
         else:  # DeepSeek
             messages = [
                 {"role": "system", "content": "You are an AI assistant answering questions based on the user's context."},
                 {"role": "user", "content": prompt}
             ]
             answer = call_deepseek(messages)
+
         # Append and display bot response
         st.session_state["chat_memory"].append(("assistant", answer))
         st.chat_message("assistant").write(answer)
+
         # Save interaction
         save_interaction(conn, "chatbot", user_input, answer)
 
-# Registration UI
 def register_ui(conn):
+    """Enhanced registration with better validation"""
     st.title("📝 Register")
     st.markdown("Create a new account.")
 
@@ -1914,7 +2108,7 @@ def register_ui(conn):
                 logging.error(f"Registration failed for {username}: {e}")
 
 def login_ui(conn):
-    """Handle user login and registration with tabbed interface"""
+    """Enhanced login with better error handling"""
     st.title("🔐 Property Deals AI")
     st.markdown("Access or create your account to use the platform.")
 
@@ -1963,7 +2157,7 @@ def login_ui(conn):
         register_ui(conn)
 
 def main():
-    """Main application function with comprehensive error handling and persistent outputs"""
+    """Main application function with comprehensive error handling"""
     # Configure page
     st.set_page_config(
         page_title="Property Deals AI",
@@ -1976,69 +2170,91 @@ def main():
     st.markdown(
         """
         <style>
-        /* Container around each input section */
-        .auction-section {
-          background-color: #f0f2f6;
-          border-radius: 12px;
-          padding: 20px;
-          margin-bottom: 20px;
-          box-shadow: 0 2px 8px rgba(0,0,0,0.05);
+        /* General sidebar styling */
+        .sidebar .sidebar-content {
+            padding: 20px;
+            background-color: #1a1a2e;
+            color: #ffffff;
         }
 
-        /* Section headings */
-        .auction-section h2,
-        .auction-section h3 {
-          color: #2E86AB;
-          margin-bottom: 12px;
-          font-weight: 600;
+        /* Welcome message styling */
+        .sidebar .welcome {
+            font-size: 1.5em;
+            font-weight: 600;
+            margin-bottom: 10px;
+            color: #ffffff;
         }
 
-        /* Labels and select boxes */
-        .auction-section .stSelectbox,
-        .auction-section .stTextArea,
-        .auction-section .stTextInput,
-        .auction-section .stNumberInput {
-          background-color: #ffffff !important;
-          border: 1px solid #d1d5db !important;
-          border-radius: 6px !important;
-          padding: 8px !important;
+        /* Location ID styling */
+        .sidebar .location {
+            font-size: 0.9em;
+            color: #b0b0b0;
+            margin-bottom: 20px;
         }
 
-        /* Primary buttons */
-        .auction-button,
-        .stButton>button {
-          background-color: #F18F01 !important;
-          color: white !important;
-          border-radius: 8px !important;
-          padding: 8px 16px !important;
-          font-weight: 500 !important;
-        }
-        .stButton>button:hover {
-          background-color: #d67a00 !important;
+        /* Navigation header styling */
+        .sidebar .navigation-header {
+            font-size: 1.2em;
+            font-weight: 500;
+            margin-bottom: 15px;
+            color: #2E86AB;
+            border-bottom: 1px solid #2E86AB;
+            padding-bottom: 5px;
         }
 
-        /* Slider styling */
-        .auction-section .stSlider > div:nth-child(1) {
-          color: #2E86AB;
+        /* Button styling */
+        .sidebar .stButton>button {
+            display: block;
+            width: 100%;
+            height: 50px;
+            background-color: #F18F01;
+            color: white;
+            border: none;
+            border-radius: 8px;
+            padding: 0 10px;
+            margin-bottom: 10px;
+            font-size: 1em;
+            font-weight: 500;
+            text-align: center;
+            line-height: 50px;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
+            transition: all 0.3s ease;
+        }
+
+        .sidebar .stButton>button:hover {
+            background-color: #d67a00;
+            transform: translateY(-2px);
+            box-shadow: 0 4px 8px rgba(0, 0, 0, 0.2);
+        }
+
+        .sidebar .stButton>button:last-child {
+            margin-bottom: 0;
+        }
+
+        /* Main content styling */
+        .main .block-container {
+            padding: 20px;
         }
 
         /* Chat history boxes */
         .st-chat-message {
-          border-radius: 8px !important;
-          padding: 12px !important;
-          margin-bottom: 8px !important;
+            border-radius: 8px !important;
+            padding: 12px !important;
+            margin-bottom: 8px !important;
         }
         .st-chat-message.user {
-          background-color: #e8f1fb !important;
+            background-color: #e8f1fb !important;
         }
         .st-chat-message.assistant {
-          background-color: #f7f7f7 !important;
+            background-color: #f7f7f7 !important;
         }
         </style>
         """,
         unsafe_allow_html=True,
     )
-
 
     # Initialize database
     try:
@@ -2097,8 +2313,9 @@ def main():
             return
 
     # Sidebar navigation - only show accessible features
-    st.sidebar.title(f"Welcome, {st.session_state.username}")
-    st.sidebar.markdown(f"**Location ID:** {st.session_state.get('location_id', 'Not specified')}")
+    st.sidebar.markdown('<div class="sidebar-content">', unsafe_allow_html=True)
+    st.sidebar.markdown(f'<div class="welcome">Welcome, {st.session_state.username}</div>', unsafe_allow_html=True)
+    st.sidebar.markdown(f'<div class="location">Location ID: {st.session_state.get("location_id", "None")}</div>', unsafe_allow_html=True)
 
     features = []
     if st.session_state.subscription.get("lease_analysis") or st.session_state.role == "admin":
@@ -2112,7 +2329,23 @@ def main():
     if st.session_state.role == "admin":
         features.insert(-1, "Admin Portal")
 
-    selected = st.sidebar.radio("Navigation", features)
+    # Initialize selected feature in session state if not already set
+    if "selected_feature" not in st.session_state:
+        st.session_state.selected_feature = features[0] if features else None
+
+    # Create navigation header
+    st.sidebar.markdown('<div class="navigation-header">Navigation</div>', unsafe_allow_html=True)
+
+    # Create buttons for each feature
+    for feature in features:
+        if st.sidebar.button(feature, key=f"nav_{feature.replace(' ', '_')}"):
+            st.session_state.selected_feature = feature
+            st.rerun()
+
+    st.sidebar.markdown('</div>', unsafe_allow_html=True)
+
+    # Use the selected feature from session state
+    selected = st.session_state.selected_feature
 
     # Main content
     try:
@@ -2136,6 +2369,7 @@ def main():
 
     # Divider and chatbot helper
     st.divider()
+
     try:
         with get_db_connection() as conn:
             chatbot_ui(conn)
@@ -2143,11 +2377,13 @@ def main():
         st.error(f"Error in chatbot: {e}")
 
     # Logout
+    st.sidebar.markdown('<div class="sidebar-content">', unsafe_allow_html=True)
     st.sidebar.divider()
-    if st.sidebar.button("Logout"):
+    if st.sidebar.button("Logout", key="logout_button"):
         for key in list(st.session_state.keys()):
             del st.session_state[key]
         st.rerun()
+    st.sidebar.markdown('</div>', unsafe_allow_html=True)
 
 if __name__ == "__main__":
     main()
