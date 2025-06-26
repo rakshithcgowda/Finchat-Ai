@@ -836,6 +836,7 @@ def lease_summarization_ui(conn):
                     save_interaction(conn, "lease_chat", user_input, response)
                 except Exception as e:
                     st.error(f"Chat response failed: {e}")
+
 def deal_structuring_ui(conn):
     """Property Guru - AI-powered deal strategist"""
     st.header("💡 Property Guru")
@@ -845,11 +846,13 @@ def deal_structuring_ui(conn):
     if "property_guru_memory" not in st.session_state:
         st.session_state.property_guru_memory = []
         st.session_state.last_strategies = None
+        st.session_state.strategy_chat_memory = []
 
     # Clear chat and strategies
     if st.button("Clear Strategies & Chat"):
         st.session_state.property_guru_memory.clear()
         st.session_state.last_strategies = None
+        st.session_state.strategy_chat_memory.clear()
         st.rerun()
 
     # Input form for Buyer and Seller details
@@ -939,38 +942,35 @@ def deal_structuring_ui(conn):
             ]
             strategies = call_deepseek(messages=messages, temperature=0.7)
 
-        # Store and display strategies
+        # Store strategies
         st.session_state.property_guru_memory.append(("assistant", strategies))
         st.session_state.last_strategies = strategies
-        st.subheader("Recommended Strategies")
-        st.markdown(strategies)
         save_interaction(conn, "deal_strategy", prompt, strategies)
+        st.rerun()  # Rerun to update UI with strategies
 
-    # Chat functionality
+    # Display strategies if they exist
     if st.session_state.get("last_strategies"):
-        st.divider()
+        st.subheader("Recommended Strategies")
+        st.markdown(st.session_state.last_strategies)
 
-        # Initialize chat memory if not exists
-        if 'strategy_chat_memory' not in st.session_state:
-            st.session_state.strategy_chat_memory = []
+        # Chat functionality
+        st.divider()
+        st.subheader("Chatbot")
+        st.markdown("Ask questions based on the strategies above.")
 
         # Display chat history
         for role, message in st.session_state.strategy_chat_memory:
-            st.chat_message(role).write(message)
+            with st.chat_message(role):
+                st.write(message)
 
-        # display the header Chatbot
-        st.subheader("Chatbot")
-        # smaller header You can question based and above satergies
-        st.markdown("Ask questions based on the strategies.")
         # Chat input
-        user_input = st.chat_input()
+        user_input = st.chat_input("Ask a question about the strategies")
         if user_input:
             # Add user message to chat
             st.session_state.strategy_chat_memory.append(("user", user_input))
-            st.chat_message("user").write(user_input)
 
             # Build context from the strategies
-            context = f"Strategies:\n{st.session_state['last_strategies']}\n\nQuestion: {user_input}"
+            context = f"Strategies:\n{st.session_state.last_strategies}\n\nQuestion: {user_input}"
 
             # Call AI
             with st.spinner("Generating response..."):
@@ -984,11 +984,10 @@ def deal_structuring_ui(conn):
 
             # Add AI response to chat
             st.session_state.strategy_chat_memory.append(("assistant", response))
-            st.chat_message("assistant").write(response)
-
-            # Save interaction
             save_interaction(conn, "strategy_chat", user_input, response)
+            st.rerun()  # Rerun to update chat UI
 
+          
 def build_guided_prompt(details, detail_level):
     """Build a plain text prompt for generating a clean, empathetic offer letter without markdown."""
     
