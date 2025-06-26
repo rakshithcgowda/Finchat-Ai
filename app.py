@@ -539,7 +539,7 @@ def extract_text_with_ocr(uploaded_file=None, file_type: str = "pdf", url: str =
 
         # Handle URL case (JPG only)
         elif url:
-            st.info("Processing JPG URL with OCR.space API...")
+            st.info("Processing JPG URL with OCR...")
             logging.info(f"Processing JPG from URL: {url}")
             response = ocr_space_url(
                 url=url,
@@ -608,46 +608,24 @@ def preprocess_image_for_ocr(img):
         st.warning(f"Image preprocessing failed: {e}")
         return img
 
+import re
+from fpdf import FPDF
+import streamlit as st
+from datetime import datetime
+import os
+
 def lease_summarization_ui(conn):
-    """Enhanced LeaseBrief Buddy with better OCR handling, summary refinement, and chat functionality"""
-    import logging
-    import streamlit as st
-    from datetime import datetime
-    from fpdf import FPDF
-    from docx import Document
-    import docx
-    from docx.shared import Pt, Cm
-    import io
-
-    logging.debug("Entering lease_summarization_ui")
-
+    """Simplified LeaseBrief Buddy with single-button workflow"""
     st.header("📄 LeaseBrief Buddy")
 
     # Clear previous summary and related data
-    if st.button("Clear Summary", key="clear_lease_summary"):
-        for k in [
-            'last_file', 'last_url', 'last_summary', 'last_mode',
-            'last_engine', 'extracted_pages', 'used_ocr',
-            'last_selected_page_index', 'lease_chat_memory'
-        ]:
+    if st.button("Clear Summary & Chat", key="clear_lease_summary"):
+        for k in ['last_file', 'last_url', 'last_summary', 'extracted_pages', 'lease_chat_memory']:
             st.session_state.pop(k, None)
-        st.success("Cleared previous summary and related content.")
+        st.success("Cleared previous summary")
         st.rerun()
 
-    st.markdown(
-        "Upload your lease PDF or JPG image, or provide a public JPG URL. "
-        "Text will be extracted using OCR and summarized as a full document."
-    )
-
-    # Initialize session state defaults
-    if 'last_engine' not in st.session_state:
-        st.session_state.last_engine = "in-depth"
-    if 'lease_chat_memory' not in st.session_state:
-        st.session_state.lease_chat_memory = []
-    if 'used_ocr' not in st.session_state:
-        st.session_state.used_ocr = False
-    if 'extracted_pages' not in st.session_state:
-        st.session_state.extracted_pages = []
+    st.markdown("Upload your lease PDF or JPG image to get an AI-generated summary.")
 
     # File uploader for PDF or JPG
     uploaded_file = st.file_uploader(
@@ -669,140 +647,69 @@ def lease_summarization_ui(conn):
         return
     elif not uploaded_file and not image_url:
         st.info("Please upload a file or enter a URL to proceed.")
-        st.markdown("### Getting Started\nUpload a lease document or provide a JPG URL to extract and summarize its contents.")
         return
 
-    # Determine input type
-    if uploaded_file:
-        file_type = "pdf" if uploaded_file.name.lower().endswith(".pdf") else "jpg"
-        input_identifier = uploaded_file.name
-    else:
-        file_type = "jpg"
-        input_identifier = image_url
+    # Generate summary button - combines OCR and summarization
+    if st.button("Generate Summary", key="lease_generate_button"):
+        with st.spinner("Processing document..."):
+            try:
+                if uploaded_file:
+                    file_type = "pdf" if uploaded_file.name.lower().endswith(".pdf") else "jpg"
+                    pages = extract_text_with_ocr(uploaded_file=uploaded_file, file_type=file_type)
+                    text = "\n".join(pages) if pages else ""
+                    input_identifier = uploaded_file.name
+                elif image_url:
+                    pages = extract_text_with_ocr(url=image_url)
+                    text = "\n".join(pages) if pages else ""
+                    input_identifier = image_url
 
-    logging.debug(f"Input: uploaded_file={uploaded_file.name if uploaded_file else None}, image_url={image_url}, file_type={file_type}")
+                if not text.strip():
+                    st.error("Failed to extract meaningful text from the document.")
+                    return
 
-    # If input changed, reset OCR state
-    if uploaded_file and st.session_state.get('last_file') != (uploaded_file.name if uploaded_file else None):
-        st.session_state.used_ocr = False
-        st.session_state.extracted_pages = []
-    if image_url and st.session_state.get('last_url') != image_url:
-        st.session_state.used_ocr = False
-        st.session_state.extracted_pages = []
+                # Generate summary
+                summary = call_deepseek(
+                    messages=[{"role": "user", "content": f"Summarize this lease agreement in clear, concise language, highlighting key terms and potential issues:\n\n{text}"}],
+                    temperature=0.3,
+                    max_tokens=2000
+                )
 
-    # AI engine selection
-    ai_engine = st.radio(
-        "Select AI Model",
-        ["in-depth"],  # Expandable to other models
-        index=0,
-        horizontal=True,
-        key="lease_ai_engine"
-    )
-    st.session_state.last_engine = ai_engine
-    logging.debug(f"Selected AI engine: {ai_engine}")
+                # Store results
+                st.session_state.last_summary = summary
+                st.session_state.last_file = input_identifier
+                st.session_state.extracted_pages = pages if pages else []
+                save_interaction(conn, "lease_summary_full", input_identifier, summary)
+                st.rerun()
 
-    # OCR Extraction
-    if st.button("Extract Text", key="lease_extract_button"):
-        pages = extract_text_with_ocr(
-            uploaded_file=uploaded_file,
-            file_type=file_type,
-            url=image_url
-        )
-        if not pages:
-            st.error(f"No readable text found in the {'PDF' if file_type == 'pdf' else 'JPG'} after OCR.")
-            st.markdown(
-                "**Suggestions**:\n"
-                "- Ensure the document is clear and legible.\n"
-                "- Try uploading a higher-resolution file.\n"
-                "- For PDFs, ensure text is not embedded as an image."
-            )
-            logging.error(f"OCR failed for {input_identifier}")
-        else:
-            st.session_state.extracted_pages = pages
-            st.session_state.used_ocr = True
-            if uploaded_file:
-                st.session_state.last_file = uploaded_file.name
-            else:
-                st.session_state.last_url = image_url
-            logging.info(f"Text extracted: {len(pages)} pages for {input_identifier}")
-            st.rerun()
-
-    # # Show status or preview
-    # if not st.session_state.used_ocr:
-    #     st.info("OCR has not yet been run. Click **Extract Text** to extract and preview document text.")
-    # else:
-    #     st.subheader("Extracted Text Preview")
-    #     page_options = (
-    #         [f"Page {i+1}" for i in range(len(st.session_state.extracted_pages))]
-    #         if file_type == "pdf" else ["Image"]
-    #     )
-    #     selected_page = st.selectbox(
-    #         "Select Page to View Extracted Text",
-    #         page_options,
-    #         key="extracted_text_dropdown",
-    #         index=st.session_state.get('last_selected_page_index', 0)
-    #     )
-    #     st.session_state['last_selected_page_index'] = page_options.index(selected_page)
-    #     page_index = page_options.index(selected_page)
-    #     extracted_text = st.session_state.extracted_pages[page_index]
-    #     if extracted_text.strip():
-    #         st.text_area(
-    #             f"Extracted Text for {selected_page} (via OCR)",
-    #             value=extracted_text,
-    #             height=300,
-    #             key=f"extracted_text_page_{page_index}"
-    #         )
-    #     else:
-    #         st.warning(f"No text extracted for {selected_page}. Try a different file or check the document quality.")
-    #         logging.warning(f"No text extracted for page {page_index + 1}")
-
-        # Generate full document summary
-        if st.button("Generate Summary", key="lease_generate_button"):
-            text = "\n".join(st.session_state.extracted_pages)
-            if not text.strip():
-                st.error("No readable text available for summarization.")
-                logging.error("No readable text for summarization")
+            except Exception as e:
+                st.error(f"Error processing document: {str(e)}")
                 return
 
-            with st.spinner("Summarizing full document..."):
-                summaries = []
-                chunks = [text[i:i+15000] for i in range(0, len(text), 15000)] if len(text) > 15000 else [text]
-                for chunk in chunks:
-                    prompt = (
-                        f"Summarize this portion of the lease agreement in {ai_engine.lower()} language, "
-                        f"preserving all key details:\n\n{chunk}"
-                    )
-                    try:
-                        summary = call_deepseek(
-                            messages=[{"role": "user", "content": prompt}],
-                            temperature=0.3,
-                            max_tokens=1024
-                        )
-                        summaries.append(summary)
-                    except Exception as e:
-                        st.error(f"Failed to generate summary chunk: {e}")
-                        logging.error(f"Summary generation failed: {e}")
-                        return
-                final = "\n\n".join(summaries)
-
-            st.session_state.last_summary = final
-            save_interaction(conn, "lease_summary_full", input_identifier, final)
-            logging.info(f"Summary generated for {input_identifier}")
-            st.rerun()
-
-    # Display and refine existing summary
-    if 'last_summary' in st.session_state and \
-       ((uploaded_file and st.session_state.get('last_file') == uploaded_file.name) or \
-        (image_url and st.session_state.get('last_url') == image_url)):
-        st.subheader(f"Full Document Summary ({st.session_state['last_engine']})")
+    # Display existing summary if available
+    if 'last_summary' in st.session_state:
+        st.subheader("Document Summary")
         st.markdown(st.session_state['last_summary'])
 
         # Export section
         st.markdown("### 📥 Export Summary")
 
         # Derive default filename
-        file_base = input_identifier.rsplit(".", 1)[0]
+        file_base = os.path.splitext(st.session_state.get('last_file', 'lease_summary'))[0]
         file_name = st.text_input("Filename (no extension):", value=file_base, key="lease_export_name")
+
+        # Function to clean markdown from text
+        def clean_markdown(text):
+            # Remove markdown headers (e.g., ###, ##, #)
+            text = re.sub(r'^#+ ', '', text, flags=re.MULTILINE)
+            # Remove bold/italic markers (e.g., **text**, *text*)
+            text = re.sub(r'\*\*([^\*]+)\*\*', r'\1', text)
+            text = re.sub(r'\*([^\*]+)\*', r'\1', text)
+            # Remove list markers (e.g., - or *)
+            text = re.sub(r'^\s*[-*]\s+', '', text, flags=re.MULTILINE)
+            # Remove extra newlines and leading/trailing whitespace
+            text = re.sub(r'\n\s*\n', '\n', text)
+            text = text.strip()
+            return text
 
         # PDF Export
         class LeasePDF(FPDF):
@@ -842,6 +749,7 @@ def lease_summarization_ui(conn):
             def paragraph(self, text):
                 self.set_font('Arial', '', 12)
                 self.set_text_color(50, 50, 50)
+                # Encode text to handle special characters
                 self.multi_cell(0, 7, text.encode('latin-1', 'replace').decode('latin-1'))
                 self.ln(4)
 
@@ -850,15 +758,13 @@ def lease_summarization_ui(conn):
         pdf.add_page()
         pdf.set_left_margin(20)
         pdf.set_right_margin(20)
-        pdf.set_title(f"Lease Summary – {file_name}")
+        pdf.set_title(f"Lease Summary - {file_name}")
         pdf.set_author("Property Deals AI")
 
         pdf.section_title("Document Information")
         info = [
-            ("Input File", input_identifier),
-            ("Mode", "Full Document"),
-            ("AI Model", st.session_state['last_engine']),
-            ("Generated at", datetime.now().strftime("%Y-%m-%d %H:%M:%S")),
+            ("Input File", st.session_state.get('last_file', 'Unknown')),
+            ("Generated at", datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
         ]
         for i, (label, val) in enumerate(info):
             pdf.set_fill_color(245, 245, 245) if i % 2 else pdf.set_fill_color(255, 255, 255)
@@ -869,7 +775,9 @@ def lease_summarization_ui(conn):
         pdf.ln(6)
 
         pdf.section_title("Lease Summary")
-        pdf.paragraph(st.session_state['last_summary'])
+        # Clean the markdown from the summary before adding to PDF
+        cleaned_summary = clean_markdown(st.session_state['last_summary'])
+        pdf.paragraph(cleaned_summary)
 
         try:
             pdf_bytes = pdf.output(dest='S').encode('latin-1', 'ignore')
@@ -882,117 +790,66 @@ def lease_summarization_ui(conn):
             )
         except Exception as e:
             st.error(f"PDF generation failed: {e}")
-            logging.error(f"PDF export failed: {e}")
 
-        # Word Export
-        doc = Document()
-        sections = doc.sections
-        for sec in sections:
-            sec.top_margin = Cm(2.5)
-            sec.bottom_margin = Cm(2.5)
-            sec.left_margin = Cm(2.0)
-            sec.right_margin = Cm(2.0)
-
-        doc.styles['Heading 1'].font.name = 'Calibri'
-        doc.styles['Heading 1'].font.size = Pt(16)
-        doc.styles['Heading 1'].font.color.rgb = docx.shared.RGBColor(44, 134, 171)
-        doc.styles['Normal'].font.name = 'Arial'
-        doc.styles['Normal'].font.size = Pt(12)
-
-        doc.add_heading("Lease Agreement Summary", level=1)
-        doc.add_paragraph(f"Mode: Full Document    AI Model: {st.session_state['last_engine']}", style='Normal')
-
-        for para in st.session_state['last_summary'].split("\n\n"):
-            doc.add_paragraph(para, style='Normal')
-
-        buf = io.BytesIO()
-        doc.save(buf)
-        st.download_button(
-            "Download Word",
-            buf.getvalue(),
-            file_name=f"{file_name}.docx",
-            mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-            key="lease_export_word"
-        )
-
-    # Chat functionality specific to the current lease
-    if 'last_summary' in st.session_state:
+        # Chat functionality
         st.divider()
-        # st.subheader("Lease Chat")
+
+        # Initialize chat memory if not exists
+        if 'lease_chat_memory' not in st.session_state:
+            st.session_state.lease_chat_memory = []
+            st.session_state.lease_chat_memory.clear()
 
         # Display chat history
         for role, message in st.session_state.lease_chat_memory:
             st.chat_message(role).write(message)
 
+        # Display the header Chatbot
+        st.subheader("Chatbot")
+        # Smaller header: You can question based on the above summary
+        st.markdown("Ask questions based on the lease summary.")
         # Chat input
-        user_input = st.chat_input("Ask about this lease...")
+        user_input = st.chat_input()
         if user_input:
             # Add user message to chat
             st.session_state.lease_chat_memory.append(("user", user_input))
             st.chat_message("user").write(user_input)
 
-            # Handle summary refinement via chat
-            if user_input.lower().startswith("refine summary"):
-                with st.spinner("Refining summary..."):
-                    prompt = f"Current Summary:\n{st.session_state['last_summary']}\n\nRefinement Request:\n{user_input}"
-                    try:
-                        response = call_deepseek(
-                            messages=[
-                                {"role": "system", "content": "Refine the lease summary based on the user's request."},
-                                {"role": "user", "content": prompt}
-                            ],
-                            temperature=0.3
-                        )
-                        st.session_state.last_summary = response
-                        st.session_state.lease_chat_memory.append(("assistant", f"Summary refined: {response}"))
-                        save_interaction(conn, "lease_chat_refine", user_input, response)
-                        logging.info("Summary refined via chat")
-                        st.rerun()
-                    except Exception as e:
-                        st.error(f"Failed to refine summary via chat: {e}")
-                        logging.error(f"Chat refinement failed: {e}")
-            else:
-                # Build context from the lease summary
-                context = f"Lease Summary:\n{st.session_state['last_summary']}\n\nQuestion: {user_input}"
+            # Build context from the lease summary
+            context = f"Lease Summary:\n{st.session_state['last_summary']}\n\nQuestion: {user_input}"
 
-                # Call AI
-                with st.spinner("Generating response..."):
-                    try:
-                        response = call_deepseek(
-                            messages=[
-                                {"role": "system", "content": "You are a lease agreement expert. Answer questions based on the provided lease summary."},
-                                {"role": "user", "content": context}
-                            ],
-                            temperature=0.2
-                        )
+            # Call AI
+            with st.spinner("Generating response..."):
+                try:
+                    response = call_deepseek(
+                        messages=[
+                            {"role": "system", "content": "You are a lease agreement expert. Answer questions based on the provided lease summary."},
+                            {"role": "user", "content": context}
+                        ],
+                        temperature=0.2
+                    )
 
-                        # Add AI response to chat
-                        st.session_state.lease_chat_memory.append(("assistant", response))
-                        st.chat_message("assistant").write(response)
+                    # Add AI response to chat
+                    st.session_state.lease_chat_memory.append(("assistant", response))
+                    st.chat_message("assistant").write(response)
 
-                        # Save interaction
-                        save_interaction(conn, "lease_chat", user_input, response)
-                        logging.info("Chat response generated")
-                    except Exception as e:
-                        st.error(f"Chat response failed: {e}")
-                        logging.error(f"Chat response failed: {e}")
-
+                    # Save interaction
+                    save_interaction(conn, "lease_chat", user_input, response)
+                except Exception as e:
+                    st.error(f"Chat response failed: {e}")
 def deal_structuring_ui(conn):
-    """Enhanced Auction Buddy with better strategy listing and chat functionality"""
-    st.header("💡 Auction Buddy")
-    st.markdown("Get AI-powered strategies tailored to your property deal based on buyer and seller details.")
+    """Property Guru - AI-powered deal strategist"""
+    st.header("💡 Property Guru")
+    st.markdown("Get AI-powered strategies tailored to your property deal.")
 
     # Initialize session state
-    if "deal_strategy_memory" not in st.session_state:
-        st.session_state.deal_strategy_memory = []
+    if "property_guru_memory" not in st.session_state:
+        st.session_state.property_guru_memory = []
         st.session_state.last_strategies = None
-        st.session_state.strategy_confidences = {}
 
     # Clear chat and strategies
-    if st.button("Clear Strategies & Chat", key="clear_strategies"):
-        st.session_state.deal_strategy_memory.clear()
+    if st.button("Clear Strategies & Chat"):
+        st.session_state.property_guru_memory.clear()
         st.session_state.last_strategies = None
-        st.session_state.strategy_confidences = {}
         st.rerun()
 
     # Input form for Buyer and Seller details
@@ -1000,29 +857,60 @@ def deal_structuring_ui(conn):
         st.markdown("### Buyer Situation")
         col1, col2 = st.columns(2)
         with col1:
-            deposit = st.selectbox("Available Deposit/Upfront Cash", ["Low/Zero", "Moderate", "High"], key="buyer_deposit")
-            credit = st.selectbox("Credit & Mortgage Ability", ["Excellent", "Average", "Poor", "None"], key="buyer_credit")
-            experience = st.selectbox("Property Investing Experience", ["No creative strategy done yet", "Have done at least one"], key="buyer_experience")
+            deposit = st.selectbox("Available Deposit/Upfront Cash",
+                                 ["Low/Zero", "Moderate", "High"],
+                                 key="buyer_deposit")
+            credit = st.selectbox("Credit & Mortgage Ability",
+                                ["Excellent", "Average", "Poor", "None"],
+                                key="buyer_credit")
+            experience = st.selectbox("Property Investing Experience",
+                                    ["No creative strategy done yet",
+                                     "Have done at least one"],
+                                    key="buyer_experience")
         with col2:
-            risk_appetite = st.selectbox("Risk Appetite", ["Low – very cautious", "Medium – balanced", "High – very comfortable with risk"], key="buyer_risk")
-            goal = st.selectbox("Primary Goal", ["Hold long-term (rental/residence)", "Resell for profit ASAP"], key="buyer_goal")
-            timeline = st.selectbox("Investment Timeline", ["Few months", "1-2 years", "Longer period"], key="buyer_timeline")
+            risk_appetite = st.selectbox("Risk Appetite",
+                                       ["Low – very cautious",
+                                        "Medium – balanced",
+                                        "High – very comfortable with risk"],
+                                       key="buyer_risk")
+            goal = st.selectbox("Primary Goal",
+                              ["Hold long-term (rental/residence)",
+                               "Resell for profit ASAP"],
+                              key="buyer_goal")
+            timeline = st.selectbox("Investment Timeline",
+                                  ["Few months", "1-2 years", "Longer period"],
+                                  key="buyer_timeline")
 
         st.markdown("### Property Details")
         col1, col2 = st.columns(2)
         with col1:
-            property_type = st.selectbox("Property Type", ["Residential", "Commercial", "Mixed-Use", "Land"], key="property_type")
-            market_price = st.number_input("Market Price (£)", min_value=0, step=1000, key="market_price")
-            offer_price = st.number_input("Your Offer Price (£)", min_value=0, step=1000, key="offer_price")
+            property_type = st.selectbox("Property Type",
+                                       ["Residential", "Commercial",
+                                        "Mixed-Use", "Land"],
+                                       key="property_type")
+            market_price = st.number_input("Market Price (£)",
+                                         min_value=0, step=1000,
+                                         key="market_price")
+            offer_price = st.number_input("Your Offer Price (£)",
+                                        min_value=0, step=1000,
+                                        key="offer_price")
         with col2:
-            property_condition = st.text_area("Property Condition & Repairs Needed", placeholder="e.g., good condition, needs roof replacement, etc.", key="property_condition")
-            market_condition = st.selectbox("Market Condition", ["Hot (multiple offers)", "Moderate (some interest)", "Slow (little interest)"], key="market_condition")
+            property_condition = st.text_area("Property Condition & Repairs Needed",
+                                            placeholder="e.g., good condition, needs roof replacement, etc.",
+                                            key="property_condition")
+            market_condition = st.selectbox("Market Condition",
+                                          ["Hot (multiple offers)",
+                                           "Moderate (some interest)",
+                                           "Slow (little interest)"],
+                                          key="market_condition")
 
         st.markdown("### Seller Motivation & Situation")
-        seller_motivation = st.text_area("Seller's Motivation & Urgency", placeholder="e.g., relocating, financial distress, etc.", key="seller_motivation")
+        seller_motivation = st.text_area("Seller's Motivation & Urgency",
+                                        placeholder="e.g., relocating, financial distress, etc.",
+                                        key="seller_motivation")
 
     # Generate strategies
-    if st.button("Generate Strategies", type="primary", key="gen_strat"):
+    if st.button("Generate Strategies", type="primary"):
         prompt = (
             f"Buyer Situation:\n"
             f"- Available Deposit/Upfront Cash: {deposit}\n"
@@ -1039,101 +927,28 @@ def deal_structuring_ui(conn):
             f"- Market Condition: {market_condition}\n\n"
             f"Seller Motivation:\n"
             f"- Motivation & Urgency: {seller_motivation}\n\n"
-            f"Generate specific deal structuring strategies for this real estate deal. "
-            f"Provide clear actionable strategies with implementation steps."
+            f"Generate 3 specific deal structuring strategies for this real estate deal. "
+            f"Provide clear actionable strategies with implementation steps. "
+            f"Format each strategy with a numbered heading and bullet points."
         )
 
         with st.spinner("Developing strategies..."):
             messages = [
-                {"role": "system", "content": "You are a real estate investment strategist. Provide specific actionable deal structuring options."},
+                {"role": "system", "content": "You are a creative real estate strategist. Provide specific actionable deal structuring options with pros and cons."},
                 {"role": "user", "content": prompt}
             ]
-            strategies = call_deepseek(messages=messages)
+            strategies = call_deepseek(messages=messages, temperature=0.7)
 
-        # Record and display
-        st.session_state.deal_strategy_memory.append(("assistant", strategies))
+        # Store and display strategies
+        st.session_state.property_guru_memory.append(("assistant", strategies))
         st.session_state.last_strategies = strategies
         st.subheader("Recommended Strategies")
         st.markdown(strategies)
-
-        # Parse strategies for dropdown - improved regex pattern
-        matches = re.findall(
-            r"(?:Strategy|Option)\s+(\d+)[:\.]?\s*(.*?)(?=\n\n|\Z|(?:Strategy|Option)\s+\d+|$)",
-            strategies,
-            flags=re.DOTALL
-        )
-
-        if matches:
-            for num, text in matches:
-                strategy_key = f"Strategy {num}"
-                if strategy_key not in st.session_state.strategy_confidences:
-                    st.session_state.strategy_confidences[strategy_key] = 7
-        else:
-            # Fallback if no numbered strategies found
-            strategy_key = "Strategy 1"
-            if strategy_key not in st.session_state.strategy_confidences:
-                st.session_state.strategy_confidences[strategy_key] = 7
-            matches = [("1", strategies)]
-
         save_interaction(conn, "deal_strategy", prompt, strategies)
 
-    # Strategy evaluation & refinement
-    strategies = st.session_state.get("last_strategies")
-    if strategies:
-        # Parse individual strategies with improved pattern
-        matches = re.findall(
-            r"(?:Strategy|Option)\s+(\d+)[:\.]?\s*(.*?)(?=(?:\n\n|\Z|(?:Strategy|Option)\s+\d+))",
-            strategies,
-            flags=re.DOTALL
-        )
-
-        if matches:
-            strategy_dict = {f"Strategy {num}": text.strip() for num, text in matches}
-        else:
-            strategy_dict = {"Strategy 1": strategies.strip()}
-
-        labels = list(strategy_dict.keys())
-        selected_label = st.selectbox("Which strategy do you prefer?", labels, key="eval_choice")
-        selected_text = strategy_dict[selected_label]
-
-        # Show the selected content
-        st.markdown(f"**{selected_label}**")
-        st.markdown(selected_text)
-
-        # Confidence slider
-        confidence = st.slider(
-            "Confidence in this strategy",
-            1, 10,
-            value=st.session_state.strategy_confidences.get(selected_label, 7),
-            key=f"conf_{selected_label.replace(' ', '_')}"
-        )
-
-        # Update confidence in session state
-        st.session_state.strategy_confidences[selected_label] = confidence
-
-        if st.button("Refine Strategy", key="refine_strat"):
-            feedback = f"{selected_label} with confidence {confidence}/10"
-            st.session_state.deal_strategy_memory.append(("user", feedback))
-
-            refinement_prompt = (
-                f"Refine this single strategy based on user feedback:\n\n"
-                f"{selected_text}\n\n"
-                f"Feedback: {feedback}"
-            )
-            messages = [
-                {"role": "system", "content": "Refine the selected strategy based on user feedback."},
-                {"role": "user", "content": refinement_prompt}
-            ]
-            refinement = call_deepseek(messages=messages)
-
-            st.session_state.deal_strategy_memory.append(("assistant", refinement))
-            st.markdown(refinement)
-            save_interaction(conn, "deal_strategy_refinement", selected_text, refinement)
-
-    # # Strategy chat functionality
-    # if st.session_state.get("last_strategies"):
-    #     st.divider()
-    #     st.subheader("Strategy Chat")
+    # Chat functionality
+    if st.session_state.get("last_strategies"):
+        st.divider()
 
         # Initialize chat memory if not exists
         if 'strategy_chat_memory' not in st.session_state:
@@ -1143,8 +958,12 @@ def deal_structuring_ui(conn):
         for role, message in st.session_state.strategy_chat_memory:
             st.chat_message(role).write(message)
 
+        # display the header Chatbot
+        st.subheader("Chatbot")
+        # smaller header You can question based and above satergies
+        st.markdown("Ask questions based on the strategies.")
         # Chat input
-        user_input = st.chat_input("Ask about these strategies...")
+        user_input = st.chat_input()
         if user_input:
             # Add user message to chat
             st.session_state.strategy_chat_memory.append(("user", user_input))
@@ -1157,7 +976,7 @@ def deal_structuring_ui(conn):
             with st.spinner("Generating response..."):
                 response = call_deepseek(
                     messages=[
-                        {"role": "system", "content": "You are a real estate strategy expert. Answer questions based on the provided strategies."},
+                        {"role": "system", "content": "You are a real estate strategy expert answering questions about deal structuring."},
                         {"role": "user", "content": context}
                     ],
                     temperature=0.3
@@ -1170,66 +989,67 @@ def deal_structuring_ui(conn):
             # Save interaction
             save_interaction(conn, "strategy_chat", user_input, response)
 
-def build_guided_prompt(details: dict, detail_level: str) -> str:
-    """Enhanced prompt builder with better structure"""
-    vendor_name = details['vendor']['name']
-    vendor_situation = details['vendor']['situation']
-    property_condition = details['vendor']['condition']
-    other_challenges = details['vendor'].get('challenges', '')
-    family_member = details['vendor'].get('family_member', '')
-    family_situation = details['vendor'].get('family_situation', '')
-
-    local_knowledge = details['local_knowledge']['experience']
-    comparables = details['local_knowledge']['comparables']
-    avg_sale_price = details['local_knowledge']['avg_sale_price']
-    required_profit = details['local_knowledge']['required_profit']
-    profit_reason = details['local_knowledge']['profit_reason']
-
+def build_guided_prompt(details, detail_level):
+    """Build a plain text prompt for generating a clean, empathetic offer letter without markdown."""
+    
+    vendor = details['vendor']
+    local_knowledge = details['local_knowledge']
     costs = details['costs']
-    total_cost = sum(costs.values())
-
-    negative_points = details.get('negative_points', '')
+    negative_points = details['negative_points']
     offers = details['offers']
+    social_proof = details['social_proof']
+    proof_of_funds = details['proof_of_funds']
 
-    social_proof = details.get('social_proof', '')
-    proof_of_funds = details.get('proof_of_funds', '')
+    # Prepare sub-components outside the main f-string to avoid syntax issues
+    comparables_str = ', '.join([
+        f"{comp['address']} ({comp['status']}, £{comp['price']})"
+        for comp in local_knowledge.get('comparables', [])
+    ])
 
-    comparables_str = "\n".join(
-        [f"- {comp['address']}: {comp['status']} at £{comp['price']}" for comp in comparables]
-    ) if comparables else "No comparables provided."
+    offers_str = ', '.join([
+        f"£{offer['amount']} ({offer['description']})"
+        for offer in offers
+    ])
 
-    costs_str = "\n".join(
-        [f"- {key}: £{value}" for key, value in costs.items()]
-    ) + f"\n- Total: £{total_cost}"
+    costs_str = ', '.join([
+        f"{k}: £{v}" for k, v in costs.items() if v > 0
+    ])
 
-    offers_str = "\n".join(
-        [f"- Offer {i+1}: £{offer['amount']} ({offer['description']})" for i, offer in enumerate(offers)]
-    ) if offers else "No offers provided."
+    prompt = (
+        "Draft a professional and empathetic offer letter for a real estate transaction. "
+        "The letter must be in plain text with no markdown characters (e.g., #, *, **, -, etc.), "
+        "no bullet points, and no headers. Use clear, concise paragraphs separated by single newlines. "
+        "Address the letter to the vendor by name and acknowledge their situation empathetically. "
+        "Include details about the property and local market, referencing comparable sales and average sale price. "
+        "Present the proposed offers with their amounts and descriptions in a narrative format, not as a list. "
+        "Explain the benefits of the offer (e.g., no estate agent fees, covered legal costs, flexible completion, 15% profit margin). "
+        "Justify the 15% profit margin. Suggest next steps, such as preparing a Heads of Terms document. "
+        "End with a polite closing and include placeholders for the sender's name, position, and contact information. "
+        f"Vendor Name: {vendor.get('name', 'N/A')}. "
+        f"Vendor Situation: {vendor.get('situation', 'N/A')}. "
+        f"Property Condition: {vendor.get('condition', 'N/A')}. "
+        f"Other Challenges: {vendor.get('challenges') or 'None provided'}. "
+        f"Family Member: {vendor.get('family_member') or 'None provided'}. "
+        f"Family Situation: {vendor.get('family_situation') or 'None provided'}. "
+        f"Local Investment Experience: {local_knowledge.get('experience', 'N/A')}. "
+        f"Comparable Sales: {comparables_str or 'None provided'}. "
+        f"Average Sale Price: £{local_knowledge.get('avg_sale_price', 'N/A')}. "
+        f"Required Profit: £{local_knowledge.get('required_profit', 'N/A')}. "
+        f"Profit Reason: {local_knowledge.get('profit_reason', 'N/A')}. "
+        f"Costs: {costs_str or 'None provided'}. "
+        f"Negative Points: {negative_points or 'None provided'}. "
+        f"Offers: {offers_str or 'None provided'}. "
+        f"Social Proof: {social_proof or 'None provided'}. "
+        f"Proof of Funds: {proof_of_funds or 'None provided'}. "
+        f"Detail Level: {detail_level} (Minimal: brief letter, Standard: balanced with key details, Comprehensive: include all provided details)."
+    )
 
-    sections = [
-        "Generate a professional real estate purchase agreement with the following details:",
-        f"- Vendor Name: {vendor_name}",
-        f"- Vendor Situation: {vendor_situation}",
-        f"- Property Condition: {property_condition}",
-        f"- Other Challenges: {other_challenges}" if other_challenges else "",
-        f"- Family Member & Situation: {family_member} - {family_situation}" if family_member and family_situation else "",
-        f"- Local Knowledge: {local_knowledge}",
-        f"- Comparables:\n{comparables_str}",
-        f"- Average Sale Price: £{avg_sale_price}",
-        f"- Required Profit (15%): £{required_profit}",
-        f"- Reason for Profit: {profit_reason}",
-        f"- Detailed Costs:\n{costs_str}",
-        f"- Potential Negative Points: {negative_points}" if negative_points else "",
-        f"- Proposed Offers:\n{offers_str}",
-        f"- Social Proof: {social_proof}" if social_proof else "",
-        f"- Proof of Funds: {proof_of_funds}" if proof_of_funds else "",
-        f"Level of Detail: {detail_level}.",
-        "Format the output as an empathetic offer letter, starting with an acknowledgment of the vendor's situation, expressing willingness to help, and thanking them for their time. Highlight the property and locality positively.Include headings and bold key points as per the provided example. Include incentives like covering legal costs, no estate agent fees, and benefits of a Purchase Lease Option and Exchange with Delayed Completion. Suggest next steps, such as preparing a Heads of Terms document."
-    ]
-    return "\n".join([s for s in sections if s])
+    return prompt
+
+
 
 def offer_generator_ui(conn):
-    """Enhanced Offer Buddy with fixed comments and download functionality"""
+    """Enhanced Offer Buddy with fixed comments and download functionality, producing plain text output"""
     st.header("✍️ Offer Buddy")
     st.markdown(
         """
@@ -1428,7 +1248,15 @@ def offer_generator_ui(conn):
 
         with st.spinner("Generating offer draft..."):
             messages = [
-                {'role': 'system', 'content': 'You are a real estate attorney drafting an empathetic offer letter.'},
+                {
+                    'role': 'system',
+                    'content': (
+                        'You are a real estate attorney drafting an empathetic offer letter. '
+                        'Produce a professional, plain text letter without any markdown characters '
+                        '(e.g., #, *, **, -, etc.), bullet points, or headers. Use clear, concise language '
+                        'with paragraphs separated by single newlines. Avoid numbered lists or formatting symbols.'
+                    )
+                },
                 {'role': 'user', 'content': prompt}
             ]
             offer = call_deepseek(messages, temperature=d['creativity'])
@@ -1436,7 +1264,7 @@ def offer_generator_ui(conn):
             save_interaction(conn, 'offer_generator', prompt, offer)
 
         st.subheader("Generated Offer Draft")
-        st.markdown(offer, unsafe_allow_html=True)
+        st.text(offer)  # Display as plain text
         col1, col2 = st.columns(2)
         with col1:
             if st.button("Proceed to Review", type="primary"):
@@ -1491,13 +1319,13 @@ def offer_generator_ui(conn):
                 st.session_state.offer_stage = 'export'
                 st.rerun()
 
-    # Stage 4: Export - Fixed download functionality
+    # Stage 4: Export
     if st.session_state.offer_stage == 'export':
         st.subheader("Export Offer")
         content = st.session_state.edited_offer or st.session_state.generated_offer
         if st.checkbox('Include Comments in Export', value=True, key='include_comments_input'):
-            comments_section = "\n\n---\n## Comments\n" + \
-                "\n".join([f"- [{c['ts']}] {c['text']}" for c in st.session_state.review_comments])
+            comments_section = "\n\nComments\n" + \
+                "\n".join([f"{c['ts']}: {c['text']}" for c in st.session_state.review_comments])
             content += comments_section
 
         export_format = st.selectbox(
@@ -1529,12 +1357,7 @@ def offer_generator_ui(conn):
             elif export_format == 'Word':
                 doc = Document()
                 for line in content.split('\n'):
-                    if line.startswith('**') and line.endswith('**'):
-                        p = doc.add_paragraph()
-                        run = p.add_run(line[2:-2])
-                        run.bold = True
-                    else:
-                        doc.add_paragraph(line)
+                    doc.add_paragraph(line)  # Plain text paragraphs
                 buf = io.BytesIO()
                 doc.save(buf)
                 st.download_button(
@@ -1583,7 +1406,7 @@ def offer_generator_ui(conn):
 
 def go_buddy_ui(conn):
     """Enhanced GO Buddy with better OCR handling and chat functionality"""
-    st.header("🚀 GO Buddy")
+    st.header("🚀 Auction Buddy")
     st.markdown("Upload multiple documents and get individual summaries in one merged document.")
 
     if 'go_buddy_files' not in st.session_state:
@@ -1995,65 +1818,65 @@ def history_ui(conn):
                 }
                 st.rerun()
 
-def chatbot_ui(conn):
-    """Enhanced chatbot with better context handling"""
-    if not st.session_state.get("username"):
-        st.warning("Please log in to use the chatbot.")
-        return
+# def chatbot_ui(conn):
+#     """Enhanced chatbot with better context handling"""
+#     if not st.session_state.get("username"):
+#         st.warning("Please log in to use the chatbot.")
+#         return
 
-    # Initialize chat memory if not exists
-    if "chat_memory" not in st.session_state:
-        st.session_state["chat_memory"] = []
+#     # Initialize chat memory if not exists
+#     if "chat_memory" not in st.session_state:
+#         st.session_state["chat_memory"] = []
 
-    st.header("🤖 AI Chatbot")
+#     st.header("🤖 AI Chatbot")
 
-    # Clear chat button
-    if st.button("Clear Chat", key="clear_chat_button"):
-        st.session_state["chat_memory"] = []
+#     # Clear chat button
+#     if st.button("Clear Chat", key="clear_chat_button"):
+#         st.session_state["chat_memory"] = []
 
-    st.markdown("Chat with the assistant based on your recent output.")
+#     st.markdown("Chat with the assistant based on your recent output.")
 
-    # Display past messages
-    for role, message in st.session_state["chat_memory"]:
-        st.chat_message(role).write(message)
+#     # Display past messages
+#     for role, message in st.session_state["chat_memory"]:
+#         st.chat_message(role).write(message)
 
-    # New user message
-    user_input = st.chat_input("Type your question...")
-    if user_input:
-        st.session_state["chat_memory"].append(("user", user_input))
+#     # New user message
+#     user_input = st.chat_input("Type your question...")
+#     if user_input:
+#         st.session_state["chat_memory"].append(("user", user_input))
 
-        # Build context from last 10 interactions
-        cursor = conn.cursor()
-        cursor.execute(
-            "SELECT feature, input_text, output_text FROM interactions WHERE username=%s ORDER BY timestamp DESC LIMIT 10",
-            (st.session_state.username,)
-        )
-        rows = cursor.fetchall()
-        context = "\n\n".join([f"Feature: {r['feature']}\nInput: {r['input_text']}\nOutput: {r['output_text']}" for r in rows])
-        prompt = f"Context:\n{context}\n\nQuestion:\n{user_input}"
+#         # Build context from last 10 interactions
+#         cursor = conn.cursor()
+#         cursor.execute(
+#             "SELECT feature, input_text, output_text FROM interactions WHERE username=%s ORDER BY timestamp DESC LIMIT 10",
+#             (st.session_state.username,)
+#         )
+#         rows = cursor.fetchall()
+#         context = "\n\n".join([f"Feature: {r['feature']}\nInput: {r['input_text']}\nOutput: {r['output_text']}" for r in rows])
+#         prompt = f"Context:\n{context}\n\nQuestion:\n{user_input}"
 
-        # Call AI
-        if st.session_state.get("chat_model_choice", "Gemini") == "Gemini":
-            answer = call_gemini(conn, "chatbot", prompt)
-        elif st.session_state.get("chat_model_choice") == "Mistral":
-            messages = [
-                {"role": "system", "content": "You are a helpful assistant using past interactions."},
-                {"role": "user", "content": prompt}
-            ]
-            answer = call_deepseek(messages)
-        else:  # DeepSeek
-            messages = [
-                {"role": "system", "content": "You are an AI assistant answering questions based on the user's context."},
-                {"role": "user", "content": prompt}
-            ]
-            answer = call_deepseek(messages)
+#         # Call AI
+#         if st.session_state.get("chat_model_choice", "Gemini") == "Gemini":
+#             answer = call_gemini(conn, "chatbot", prompt)
+#         elif st.session_state.get("chat_model_choice") == "Mistral":
+#             messages = [
+#                 {"role": "system", "content": "You are a helpful assistant using past interactions."},
+#                 {"role": "user", "content": prompt}
+#             ]
+#             answer = call_deepseek(messages)
+#         else:  # DeepSeek
+#             messages = [
+#                 {"role": "system", "content": "You are an AI assistant answering questions based on the user's context."},
+#                 {"role": "user", "content": prompt}
+#             ]
+#             answer = call_deepseek(messages)
 
-        # Append and display bot response
-        st.session_state["chat_memory"].append(("assistant", answer))
-        st.chat_message("assistant").write(answer)
+#         # Append and display bot response
+#         st.session_state["chat_memory"].append(("assistant", answer))
+#         st.chat_message("assistant").write(answer)
 
-        # Save interaction
-        save_interaction(conn, "chatbot", user_input, answer)
+#         # Save interaction
+#         save_interaction(conn, "chatbot", user_input, answer)
 
 def register_ui(conn):
     """Enhanced registration with better validation"""
@@ -2157,7 +1980,7 @@ def login_ui(conn):
         register_ui(conn)
 
 def main():
-    """Main application function with comprehensive error handling"""
+    """Main application function with improved initialization"""
     # Configure page
     st.set_page_config(
         page_title="Property Deals AI",
@@ -2256,12 +2079,15 @@ def main():
         unsafe_allow_html=True,
     )
 
-    # Initialize database
-    try:
-        init_db()
-    except Exception as e:
-        st.error(f"Failed to initialize application: {e}")
-        return
+    # Initialize database with loading indicator
+    if "_initialized" not in st.session_state:
+        with st.spinner("Initializing application..."):
+            try:
+                init_db()
+                st.session_state._initialized = True
+            except Exception as e:
+                st.error(f"Failed to initialize application: {e}")
+                return
 
     # Ensure login state
     if "logged_in" not in st.session_state:
@@ -2282,7 +2108,7 @@ def main():
             login_ui(conn)
         return
 
-    # After login check, get user's subscription status
+    # Get user's subscription status
     if st.session_state.logged_in:
         try:
             with get_db_connection() as conn:
@@ -2312,51 +2138,47 @@ def main():
             st.error(f"Error fetching subscription status: {e}")
             return
 
-    # Sidebar navigation - only show accessible features
+    # Sidebar navigation
     st.sidebar.markdown('<div class="sidebar-content">', unsafe_allow_html=True)
     st.sidebar.markdown(f'<div class="welcome">Welcome, {st.session_state.username}</div>', unsafe_allow_html=True)
     st.sidebar.markdown(f'<div class="location">Location ID: {st.session_state.get("location_id", "None")}</div>', unsafe_allow_html=True)
 
+    # Available features based on subscription
     features = []
     if st.session_state.subscription.get("lease_analysis") or st.session_state.role == "admin":
         features.append("LeaseBrief Buddy")
     if st.session_state.subscription.get("deal_structuring") or st.session_state.role == "admin":
-        features.append("Auction Buddy")
+        features.append("Property Guru")
     if st.session_state.subscription.get("offer_generator") or st.session_state.role == "admin":
         features.append("Offer Buddy")
-    features.append("GO Buddy")
+    features.append("Auction Buddy")
     features.append("History")
     if st.session_state.role == "admin":
         features.insert(-1, "Admin Portal")
 
-    # Initialize selected feature in session state if not already set
+    # Initialize selected feature
     if "selected_feature" not in st.session_state:
         st.session_state.selected_feature = features[0] if features else None
 
-    # Create navigation header
+    # Navigation buttons
     st.sidebar.markdown('<div class="navigation-header">Navigation</div>', unsafe_allow_html=True)
-
-    # Create buttons for each feature
     for feature in features:
         if st.sidebar.button(feature, key=f"nav_{feature.replace(' ', '_')}"):
             st.session_state.selected_feature = feature
             st.rerun()
-
     st.sidebar.markdown('</div>', unsafe_allow_html=True)
 
-    # Use the selected feature from session state
-    selected = st.session_state.selected_feature
-
-    # Main content
+    # Main content area
     try:
         with get_db_connection() as conn:
+            selected = st.session_state.selected_feature
             if selected == "LeaseBrief Buddy":
                 lease_summarization_ui(conn)
-            elif selected == "Auction Buddy":
+            elif selected == "Property Guru":
                 deal_structuring_ui(conn)
             elif selected == "Offer Buddy":
                 offer_generator_ui(conn)
-            elif selected == "GO Buddy":
+            elif selected == "Auction Buddy":
                 go_buddy_ui(conn)
             elif selected == "History":
                 history_ui(conn)
@@ -2365,21 +2187,20 @@ def main():
             else:
                 st.error("Access Denied")
     except Exception as e:
-        st.error(f"Error in {selected} feature: {e}")
+        st.error(f"Application error: {e}")
 
-    # Divider and chatbot helper
-    st.divider()
+    # Chatbot section
+    # st.divider()
+    # try:
+    #     with get_db_connection() as conn:
+    #         chatbot_ui(conn)
+    # except Exception as e:
+    #     st.error(f"Chatbot error: {e}")
 
-    try:
-        with get_db_connection() as conn:
-            chatbot_ui(conn)
-    except Exception as e:
-        st.error(f"Error in chatbot: {e}")
-
-    # Logout
+    # Logout button
     st.sidebar.markdown('<div class="sidebar-content">', unsafe_allow_html=True)
     st.sidebar.divider()
-    if st.sidebar.button("Logout", key="logout_button"):
+    if st.sidebar.button("Logout"):
         for key in list(st.session_state.keys()):
             del st.session_state[key]
         st.rerun()
