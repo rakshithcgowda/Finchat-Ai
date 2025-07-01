@@ -1,8 +1,8 @@
-<h1>Property Deals AI<h1/>
+<h1>Property Deals AI</h1>
 
 ---
 
-*A Streamlit-based web application that provides AI-powered tools for real estate professionals, including document summarization, deal structuring, offer generation, and auction document analysis. It integrates *OCR, Google Gemini, Mistral, DeepSeek, and OpenAI APIs.
+A Streamlit-based web application that provides AI-powered tools for real estate professionals, including document summarization, deal structuring, offer generation, and auction document analysis. It integrates OCR, Google Gemini, Mistral, DeepSeek, and OpenAI APIs.
 
 ---
 
