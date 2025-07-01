@@ -20,8 +20,8 @@ A Streamlit-based web application that provides AI-powered tools for real estate
 1. **Clone the repository**:
 
    ```bash
-   git clone https://github.com/your-username/property-deals-ai.git
-   cd property-deals-ai
+   git clone https://github.com/rakshithcgowda/Finchat-Ai.git
+   cd Finchat-Ai
    ```
 
 2. **Create a virtual environment**:
